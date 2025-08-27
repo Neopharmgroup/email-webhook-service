@@ -32,9 +32,7 @@ const WEBHOOK_SITE_URL = process.env.WEBHOOK_SITE_URL;
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'email-webhooks';
 
-// משתנים גלובליים לניהול tokens ו-subscriptions
-let currentAccessToken = null;
-let currentRefreshToken = null;
+// משתנים גלובליים לניהול subscriptions
 let subscriptions = new Map();
 let refreshIntervals = new Map();
 
@@ -45,22 +43,26 @@ let db = null;
 // התחברות למונגו DB
 async function connectToMongoDB() {
     try {
-        console.log('🔄 מתחבר למונגו DB...');
+        console.log(' מתחבר למונגו DB...');
         mongoClient = new MongoClient(MONGODB_URI);
         await mongoClient.connect();
         db = mongoClient.db(MONGODB_DB_NAME);
         
-        // יצירת אינדקסים
+        // יצירת אינדקסים מעודכנים
         await db.collection('tracked_emails').createIndex({ 'email': 1 }, { unique: true });
         await db.collection('tracked_emails').createIndex({ 'isActive': 1 });
+        await db.collection('tracked_emails').createIndex({ 'hasAuthorization': 1 });
+        await db.collection('tracked_emails').createIndex({ 'subscriptionStatus': 1 });
         await db.collection('subscriptions').createIndex({ 'subscriptionId': 1 }, { unique: true });
+        await db.collection('subscriptions').createIndex({ 'userEmail': 1 });
         await db.collection('webhook_notifications').createIndex({ 'receivedAt': -1 });
         await db.collection('webhook_notifications').createIndex({ 'senderEmail': 1 });
+        await db.collection('webhook_notifications').createIndex({ 'trackedRecipientEmail': 1 });
         
-        console.log('✅ התחברות למונגו DB הצליחה!');
+        console.log(' התחברות למונגו DB הצליחה!');
         return true;
     } catch (error) {
-        console.error('❌ שגיאה בהתחברות למונגו DB:', error.message);
+        console.error(' שגיאה בהתחברות למונגו DB:', error.message);
         return false;
     }
 }
@@ -73,10 +75,10 @@ function validateEnvironmentVariables() {
         .map(([key]) => key);
     
     if (missing.length > 0) {
-        console.error('❌ חסרים משתני סביבה:', missing.join(', '));
+        console.error(' חסרים משתני סביבה:', missing.join(', '));
         return false;
     }
-    console.log('✅ כל משתני הסביבה מוגדרים כראוי');
+    console.log(' כל משתני הסביבה מוגדרים כראוי');
     return true;
 }
 
@@ -84,22 +86,43 @@ function isWebhookSiteUrl(url) {
     return /webhook\.site/i.test(url);
 }
 
-// פונקציה לחידוש access token
-async function refreshAccessToken() {
-    if (!currentRefreshToken) {
-        console.error('❌ אין refresh token זמין');
+// פונקציה ליצירת URL הרשאה לכתובת ספציפית
+function generateAuthUrlForEmail(emailAddress) {
+    const state = Buffer.from(JSON.stringify({
+        email: emailAddress,
+        timestamp: Date.now(),
+        action: 'track_email'
+    })).toString('base64');
+    
+    const authUrl = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/authorize?` +
+        `client_id=${CLIENT_ID}&` +
+        `response_type=code&` +
+        `redirect_uri=${encodeURIComponent(REDIRECT_URI)}&` +
+        `scope=${encodeURIComponent('https://graph.microsoft.com/Mail.Read offline_access')}&` +
+        `response_mode=query&` +
+        `state=${state}&` +
+        `login_hint=${encodeURIComponent(emailAddress)}&` +
+        `prompt=consent`;
+    
+    return authUrl;
+}
+
+// פונקציה לחידוש access token של משתמש ספציפי
+async function refreshUserAccessToken(userRefreshToken) {
+    if (!userRefreshToken) {
+        console.error(' אין refresh token זמין למשתמש');
         return null;
     }
 
     try {
-        console.log('🔄 מחדש access token...');
+        console.log(' מחדש access token למשתמש...');
         
         const response = await axios.post(
             `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
             new URLSearchParams({
                 client_id: CLIENT_ID,
                 client_secret: CLIENT_SECRET,
-                refresh_token: currentRefreshToken,
+                refresh_token: userRefreshToken,
                 grant_type: 'refresh_token',
                 scope: 'https://graph.microsoft.com/Mail.Read offline_access'
             }),
@@ -110,15 +133,98 @@ async function refreshAccessToken() {
             }
         );
         
-        currentAccessToken = response.data.access_token;
-        if (response.data.refresh_token) {
-            currentRefreshToken = response.data.refresh_token;
+        console.log(' Token משתמש חודש בהצלחה');
+        return {
+            accessToken: response.data.access_token,
+            refreshToken: response.data.refresh_token || userRefreshToken,
+            expiresIn: response.data.expires_in
+        };
+    } catch (error) {
+        console.error(' שגיאה בחידוש token משתמש:', error.response?.data || error.message);
+        return null;
+    }
+}
+
+// בדיקה אם token פג תוקף
+async function isTokenExpired(accessToken) {
+    try {
+        await axios.get('https://graph.microsoft.com/v1.0/me', {
+            headers: { 'Authorization': `Bearer ${accessToken}` },
+            timeout: 5000
+        });
+        return false;
+    } catch (error) {
+        if (error.response?.status === 401) {
+            return true;
+        }
+        return false;
+    }
+}
+
+// קבלת access token עדכני למשתמש
+async function getValidAccessTokenForUser(userEmail) {
+    if (!db) return null;
+    
+    try {
+        const user = await db.collection('tracked_emails').findOne({
+            email: userEmail.toLowerCase(),
+            hasAuthorization: true
+        });
+        
+        if (!user || !user.accessToken) {
+            console.log(` לא נמצא access token עבור ${userEmail}`);
+            return null;
         }
         
-        console.log('✅ Token חודש בהצלחה');
-        return currentAccessToken;
+        // בדיקה אם ה-token עדיין תקף
+        const isExpired = await isTokenExpired(user.accessToken);
+        
+        if (!isExpired) {
+            return user.accessToken;
+        }
+        
+        // חידוש token אם פג תוקף
+        console.log(` מחדש token עבור ${userEmail}...`);
+        const refreshResult = await refreshUserAccessToken(user.refreshToken);
+        
+        if (!refreshResult) {
+            console.error(` לא ניתן לחדש token עבור ${userEmail}`);
+            
+            // עדכון סטטוס למשתמש שנכשל
+            await db.collection('tracked_emails').updateOne(
+                { email: userEmail.toLowerCase() },
+                {
+                    $set: {
+                        hasAuthorization: false,
+                        subscriptionStatus: 'token_failed',
+                        updatedAt: new Date()
+                    }
+                }
+            );
+            
+            return null;
+        }
+        
+        // עדכון tokens במונגו
+        const expiresAt = new Date(Date.now() + (refreshResult.expiresIn * 1000));
+        
+        await db.collection('tracked_emails').updateOne(
+            { email: userEmail.toLowerCase() },
+            {
+                $set: {
+                    accessToken: refreshResult.accessToken,
+                    refreshToken: refreshResult.refreshToken,
+                    tokenExpiresAt: expiresAt,
+                    updatedAt: new Date()
+                }
+            }
+        );
+        
+        console.log(` Token עודכן בהצלחה עבור ${userEmail}`);
+        return refreshResult.accessToken;
+        
     } catch (error) {
-        console.error('❌ שגיאה בחידוש token:', error.response?.data || error.message);
+        console.error(` שגיאה בקבלת access token עבור ${userEmail}:`, error.message);
         return null;
     }
 }
@@ -148,27 +254,49 @@ async function getEmailDetails(messageId, accessToken) {
             ccRecipients: message.ccRecipients?.map(r => r.emailAddress?.address) || []
         };
     } catch (error) {
-        console.error('❌ שגיאה בקבלת פרטי מייל:', error.message);
+        console.error(' שגיאה בקבלת פרטי מייל:', error.message);
         return null;
     }
 }
 
-// פונקציה ליצירת subscription
-async function createEmailSubscription(accessToken, userEmail = 'me') {
+// פונקציה ליצירת subscription לכתובת ספציפית
+async function createEmailSubscriptionForUser(accessToken, userEmail) {
     const maxExpirationTime = new Date(Date.now() + (4230 * 60 * 1000)).toISOString();
     const notificationUrl = WEBHOOK_URL;
+
+    // קביעת הresource על בסיס הכתובת
+    let resource = "me/mailFolders('Inbox')/messages";
+    let userId = null;
+    
+    try {
+        // קבלת פרטי המשתמש
+        const userResponse = await axios.get(
+            'https://graph.microsoft.com/v1.0/me',
+            {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+            }
+        );
+        
+        userId = userResponse.data.id;
+        const actualEmail = userResponse.data.mail || userResponse.data.userPrincipalName;
+        
+        console.log(` יוצר subscription עבור userId: ${userId} (${actualEmail})`);
+        
+    } catch (userError) {
+        console.log(' לא ניתן לקבל user details, משתמש ב-me');
+    }
 
     const subscription = {
         changeType: 'created',
         notificationUrl: notificationUrl,
-        resource: `${userEmail}/mailFolders('Inbox')/messages`,
+        resource: resource,
         expirationDateTime: maxExpirationTime,
-        clientState: 'EmailWebhookSubscription',
+        clientState: `EmailWebhookSubscription_${userEmail}`,
         latestSupportedTlsVersion: 'v1_2'
     };
 
     try {
-        console.log('🔄 יוצר subscription למיילים...');
+        console.log(` יוצר subscription עבור ${userEmail}...`);
         
         const response = await axios.post(
             'https://graph.microsoft.com/v1.0/subscriptions',
@@ -184,6 +312,7 @@ async function createEmailSubscription(accessToken, userEmail = 'me') {
         const subscriptionData = {
             subscriptionId: response.data.id,
             userEmail: userEmail,
+            userId: userId,
             resource: response.data.resource,
             expirationDateTime: response.data.expirationDateTime,
             status: 'active',
@@ -198,123 +327,21 @@ async function createEmailSubscription(accessToken, userEmail = 'me') {
 
         subscriptions.set(response.data.id, subscriptionData);
         
-        console.log('✅ Email subscription נוצרה בהצלחה!');
-        console.log('📧 Subscription ID:', response.data.id);
+        console.log(` Email subscription נוצרה בהצלחה עבור ${userEmail}!`);
+        console.log(' Subscription ID:', response.data.id);
         
-        scheduleSubscriptionRenewal(response.data.id, response.data.expirationDateTime);
-        
-        return response.data;
-    } catch (error) {
-        console.error('❌ שגיאה ביצירת Subscription:', JSON.stringify(error.response?.data, null, 2));
-        throw error;
-    }
-}
-
-// פונקציה לחידוש subscription
-async function renewSubscription(subscriptionId) {
-    try {
-        const freshToken = await refreshAccessToken();
-        if (!freshToken) {
-            throw new Error('לא ניתן לחדש token');
-        }
-
-        console.log('🔄 מחדש subscription:', subscriptionId);
-        
-        const newExpirationTime = new Date(Date.now() + (4230 * 60 * 1000)).toISOString();
-        
-        const response = await axios.patch(
-            `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
-            {
-                expirationDateTime: newExpirationTime
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${freshToken}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
-        
-        // עדכון במונגו ובמפה
-        if (db) {
-            await db.collection('subscriptions').updateOne(
-                { subscriptionId: subscriptionId },
-                { 
-                    $set: { 
-                        expirationDateTime: response.data.expirationDateTime,
-                        lastRenewed: new Date(),
-                        status: 'active'
-                    }
-                }
-            );
-        }
-
-        const subscriptionData = subscriptions.get(subscriptionId);
-        if (subscriptionData) {
-            subscriptionData.expirationDateTime = response.data.expirationDateTime;
-            subscriptionData.lastRenewed = new Date();
-        }
-        
-        console.log('✅ Subscription חודש בהצלחה!');
-        
-        scheduleSubscriptionRenewal(subscriptionId, response.data.expirationDateTime);
+        // תזמון חידוש
+        scheduleSubscriptionRenewal(response.data.id, response.data.expirationDateTime, userEmail);
         
         return response.data;
     } catch (error) {
-        console.error('❌ שגיאה בחידוש subscription:', error.response?.data || error.message);
-        
-        // במקרה של כשל, נסה ליצור subscription חדש
-        try {
-            await createEmailSubscription(currentAccessToken);
-        } catch (createError) {
-            console.error('❌ גם יצירת subscription חדש נכשלה');
-        }
-        
+        console.error(`שגיאה ביצירת Subscription עבור ${userEmail}:`, JSON.stringify(error.response?.data, null, 2));
         throw error;
     }
 }
 
-// מחיקת subscription
-async function deleteSubscription(subscriptionId) {
-    try {
-        const freshToken = await refreshAccessToken();
-        if (!freshToken) {
-            throw new Error('לא ניתן לחדש token');
-        }
-
-        await axios.delete(
-            `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
-            {
-                headers: {
-                    'Authorization': `Bearer ${freshToken}`
-                }
-            }
-        );
-        
-        // מחיקה מהמונגו ומהמפה
-        if (db) {
-            await db.collection('subscriptions').updateOne(
-                { subscriptionId: subscriptionId },
-                { $set: { status: 'deleted', deletedAt: new Date() } }
-            );
-        }
-
-        subscriptions.delete(subscriptionId);
-        
-        if (refreshIntervals.has(subscriptionId)) {
-            clearTimeout(refreshIntervals.get(subscriptionId));
-            refreshIntervals.delete(subscriptionId);
-        }
-        
-        console.log('✅ Subscription נמחק בהצלחה:', subscriptionId);
-    } catch (error) {
-        console.error('❌ שגיאה במחיקת subscription:', error.response?.data || error.message);
-        throw error;
-    }
-}
-
-// תזמון חידוש subscription
-function scheduleSubscriptionRenewal(subscriptionId, expirationDateTime) {
+// תזמון חידוש subscription עם משתמש ספציפי
+function scheduleSubscriptionRenewal(subscriptionId, expirationDateTime, userEmail) {
     // ניקוי interval קודם אם קיים
     if (refreshIntervals.has(subscriptionId)) {
         clearTimeout(refreshIntervals.get(subscriptionId));
@@ -327,27 +354,152 @@ function scheduleSubscriptionRenewal(subscriptionId, expirationDateTime) {
     const renewalTime = timeUntilExpiration - (30 * 60 * 1000); // 30 דקות לפני פקיעה
     
     if (renewalTime > 0) {
-        console.log(`⏰ Subscription ${subscriptionId} יחודש בעוד ${Math.round(renewalTime / 60000)} דקות`);
+        console.log(` Subscription ${subscriptionId} עבור ${userEmail} יחודש בעוד ${Math.round(renewalTime / 60000)} דקות`);
         
         const interval = setTimeout(async () => {
             try {
-                await renewSubscription(subscriptionId);
+                await renewSubscriptionForUser(subscriptionId, userEmail);
             } catch (error) {
-                console.error('❌ כשל בחידוש אוטומטי של subscription:', subscriptionId);
+                console.error(` כשל בחידוש אוטומטי של subscription עבור ${userEmail}:`, subscriptionId);
             }
         }, renewalTime);
         
         refreshIntervals.set(subscriptionId, interval);
     } else {
-        console.log('⚠️ Subscription פג תוקף - יחודש מיד');
-        renewSubscription(subscriptionId);
+        console.log(` Subscription עבור ${userEmail} פג תוקף - יחודש מיד`);
+        renewSubscriptionForUser(subscriptionId, userEmail);
+    }
+}
+
+// חידוש subscription עבור משתמש ספציפי
+async function renewSubscriptionForUser(subscriptionId, userEmail) {
+    try {
+        console.log(` מחדש subscription ${subscriptionId} עבור ${userEmail}...`);
+        
+        const accessToken = await getValidAccessTokenForUser(userEmail);
+        if (!accessToken) {
+            throw new Error(`לא ניתן לקבל access token עבור ${userEmail}`);
+        }
+        
+        const newExpirationTime = new Date(Date.now() + (4230 * 60 * 1000)).toISOString();
+        
+        const response = await axios.patch(
+            `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
+            {
+                expirationDateTime: newExpirationTime
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        // עדכון במונגו
+        if (db) {
+            await db.collection('subscriptions').updateOne(
+                { subscriptionId: subscriptionId },
+                { 
+                    $set: { 
+                        expirationDateTime: response.data.expirationDateTime,
+                        lastRenewed: new Date(),
+                        status: 'active'
+                    }
+                }
+            );
+            
+            // עדכון גם בtracked_emails
+            await db.collection('tracked_emails').updateOne(
+                { email: userEmail.toLowerCase() },
+                {
+                    $set: {
+                        subscriptionExpiresAt: new Date(response.data.expirationDateTime),
+                        subscriptionStatus: 'active',
+                        updatedAt: new Date()
+                    }
+                }
+            );
+        }
+
+        console.log(` Subscription חודש בהצלחה עבור ${userEmail}!`);
+        scheduleSubscriptionRenewal(subscriptionId, response.data.expirationDateTime, userEmail);
+        
+        return response.data;
+    } catch (error) {
+        console.error(` שגיאה בחידוש subscription עבור ${userEmail}:`, error.response?.data || error.message);
+        
+        // עדכון סטטוס כשל
+        if (db) {
+            await db.collection('tracked_emails').updateOne(
+                { email: userEmail.toLowerCase() },
+                {
+                    $set: {
+                        subscriptionStatus: 'renewal_failed',
+                        updatedAt: new Date()
+                    }
+                }
+            );
+        }
+        
+        throw error;
+    }
+}
+
+// מחיקת subscription
+async function deleteSubscriptionForUser(subscriptionId, userEmail) {
+    try {
+        const accessToken = await getValidAccessTokenForUser(userEmail);
+        if (!accessToken) {
+            throw new Error(`לא ניתן לקבל access token עבור ${userEmail}`);
+        }
+
+        await axios.delete(
+            `https://graph.microsoft.com/v1.0/subscriptions/${subscriptionId}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`
+                }
+            }
+        );
+        
+        // עדכון במונגו
+        if (db) {
+            await db.collection('subscriptions').updateOne(
+                { subscriptionId: subscriptionId },
+                { $set: { status: 'deleted', deletedAt: new Date() } }
+            );
+            
+            await db.collection('tracked_emails').updateOne(
+                { email: userEmail.toLowerCase() },
+                {
+                    $set: {
+                        subscriptionStatus: 'deleted',
+                        subscriptionId: null,
+                        updatedAt: new Date()
+                    }
+                }
+            );
+        }
+
+        subscriptions.delete(subscriptionId);
+        
+        if (refreshIntervals.has(subscriptionId)) {
+            clearTimeout(refreshIntervals.get(subscriptionId));
+            refreshIntervals.delete(subscriptionId);
+        }
+        
+        console.log(` Subscription נמחק בהצלחה עבור ${userEmail}:`, subscriptionId);
+    } catch (error) {
+        console.error(` שגיאה במחיקת subscription עבור ${userEmail}:`, error.response?.data || error.message);
+        throw error;
     }
 }
 
 // פונקציה משודרגת לשליחת webhook
 async function sendToWebhookSite(webhookData) {
     if (!WEBHOOK_SITE_URL) {
-        console.log('⚠️ WEBHOOK_SITE_URL לא מוגדר');
+        console.log('WEBHOOK_SITE_URL לא מוגדר');
         return false;
     }
 
@@ -357,13 +509,12 @@ async function sendToWebhookSite(webhookData) {
                 'Content-Type': 'application/json',
                 'User-Agent': 'Microsoft-Graph-Email-Webhook/1.0'
             },
-            timeout: 15000, // 15 שניות timeout
+            timeout: 15000,
             validateStatus: function (status) {
                 return status >= 200 && status < 300;
             }
         };
 
-        // הגדרה מיוחדת לHTTPS עם SSL bypass
         if (WEBHOOK_SITE_URL.startsWith('https://')) {
             axiosConfig.httpsAgent = new https.Agent({
                 rejectUnauthorized: false,
@@ -372,10 +523,10 @@ async function sendToWebhookSite(webhookData) {
             });
         }
 
-        console.log('📤 שולח webhook ל:', WEBHOOK_SITE_URL);
+        console.log(' שולח webhook ל:', WEBHOOK_SITE_URL);
         const response = await axios.post(WEBHOOK_SITE_URL, webhookData, axiosConfig);
         
-        console.log('✅ Webhook נשלח בהצלחה!', {
+        console.log(' Webhook נשלח בהצלחה!', {
             status: response.status,
             statusText: response.statusText
         });
@@ -383,7 +534,7 @@ async function sendToWebhookSite(webhookData) {
         return true;
 
     } catch (error) {
-        console.error('❌ שגיאה בשליחת webhook:', {
+        console.error(' שגיאה בשליחת webhook:', {
             message: error.message,
             code: error.code,
             status: error.response?.status,
@@ -394,64 +545,18 @@ async function sendToWebhookSite(webhookData) {
     }
 }
 
-// פונקציה לשמירת התראת webhook עם בדיקת כתובת מעוקבת
-async function saveWebhookNotification(notificationData) {
+// שמירת התראת webhook עבור משתמש ספציפי
+async function saveWebhookNotificationForUser(notificationData, emailDetails, targetUserEmail) {
     if (!db) {
-        console.error('❌ אין חיבור למונגו DB');
+        console.error(' אין חיבור למונגו DB');
         return null;
     }
 
     try {
-        console.log('🔍 מחפש כתובות מעקב פעילות...');
+        console.log(` מעבד מייל עבור משתמש: ${targetUserEmail}`);
+        console.log(` מייל מ: ${emailDetails.from} | נושא: ${emailDetails.subject}`);
         
-        // בדיקה אם יש כתובות מעקב פעילות
-        const trackedEmails = await db.collection('tracked_emails').find({ isActive: true }).toArray();
-        
-        if (trackedEmails.length === 0) {
-            console.log('⚠️ אין כתובות מעקב פעילות - מתעלם מההתראה');
-            return null;
-        }
-
-        console.log(`📧 נמצאו ${trackedEmails.length} כתובות במעקב:`, trackedEmails.map(e => e.email));
-
-        // קבלת פרטי המייל מ-Microsoft Graph
-        let emailDetails = null;
-        if (currentAccessToken && notificationData.messageId !== 'unknown') {
-            console.log('🔄 מקבל פרטי מייל מ-Microsoft Graph...');
-            emailDetails = await getEmailDetails(notificationData.messageId, currentAccessToken);
-        }
-
-        if (!emailDetails) {
-            console.log('⚠️ לא ניתן לקבל פרטי מייל - מתעלם');
-            return null;
-        }
-
-        // בדיקה אם המייל הגיע לכתובת מעוקבת
-        const senderEmail = emailDetails.from.toLowerCase();
-        const allRecipients = [
-            ...emailDetails.toRecipients,
-            ...emailDetails.ccRecipients
-        ].map(email => email.toLowerCase());
-        
-        console.log(`📨 מייל מ: ${senderEmail}`);
-        console.log(`📬 אל: ${allRecipients.join(', ')}`);
-        
-        // בדיקה אם אחד מהנמענים נמצא ברשימת המעקב
-        const trackedRecipient = trackedEmails.find(tracked => 
-            allRecipients.includes(tracked.email.toLowerCase())
-        );
-
-        if (!trackedRecipient) {
-            console.log(`⚠️ מייל לא הגיע לכתובת מעוקבת - מתעלם`);
-            console.log('📋 נמענים:', allRecipients);
-            console.log('📋 כתובות במעקב:', trackedEmails.map(e => e.email));
-            return null;
-        }
-
-        console.log(`🎯 ✅ מייל הגיע לכתובת מעוקבת: ${trackedRecipient.email}`);
-        console.log(`📧 מהשולח: ${senderEmail} | נושא: ${emailDetails.subject}`);
-
-        // שמירת ההתראה עם פרטי המייל
+        // שמירת ההתראה
         const webhookDocument = {
             subscriptionId: notificationData.subscriptionId,
             resource: notificationData.resource,
@@ -460,9 +565,10 @@ async function saveWebhookNotification(notificationData) {
             receivedAt: new Date(),
             messageId: notificationData.messageId,
             processed: true,
+            
             // פרטי המייל
-            senderEmail: senderEmail,
-            trackedRecipientEmail: trackedRecipient.email, // הכתובת המעוקבת שקיבלה את המייל
+            trackedUserEmail: targetUserEmail, // המשתמש שמעוקב
+            senderEmail: emailDetails.from.toLowerCase(),
             subject: emailDetails.subject,
             receivedDateTime: emailDetails.receivedDateTime,
             bodyPreview: emailDetails.bodyPreview,
@@ -474,32 +580,31 @@ async function saveWebhookNotification(notificationData) {
         };
 
         const result = await db.collection('webhook_notifications').insertOne(webhookDocument);
-        console.log('✅ התראת webhook נשמרה במונגו:', result.insertedId);
+        console.log(' התראת webhook נשמרה במונגו:', result.insertedId);
         
-        // עדכון סטטיסטיקות כתובת המעקב
-        await updateTrackedEmailStats(trackedRecipient.email);
+        // עדכון סטטיסטיקות
+        await updateTrackedEmailStats(targetUserEmail);
         
         // שליחת webhook
         const webhookPayload = {
             type: 'email_received_notification',
             timestamp: new Date().toISOString(),
             emailData: {
-                from: senderEmail,
-                to_tracked_address: trackedRecipient.email, // הכתובת המעוקבת שקיבלה
+                from: emailDetails.from,
+                to_tracked_user: targetUserEmail,
                 subject: emailDetails.subject,
                 receivedDateTime: emailDetails.receivedDateTime,
                 bodyPreview: emailDetails.bodyPreview,
                 isRead: emailDetails.isRead,
                 hasAttachments: emailDetails.hasAttachments,
                 importance: emailDetails.importance,
-                allRecipients: allRecipients
+                allRecipients: [...emailDetails.toRecipients, ...emailDetails.ccRecipients]
             },
-            source: 'Microsoft Graph Email Webhook - TO Tracking',
+            source: 'Microsoft Graph Email Webhook - Multi User Tracking',
             processed_at: new Date().toLocaleString('he-IL'),
             webhookId: result.insertedId
         };
 
-        // שליחה ל-webhook.site
         const webhookSent = await sendToWebhookSite(webhookPayload);
         
         // עדכון המסמך בבסיס הנתונים עם סטטוס השליחה
@@ -510,18 +615,18 @@ async function saveWebhookNotification(notificationData) {
         
         return result.insertedId;
     } catch (error) {
-        console.error('❌ שגיאה בשמירת התראת webhook:', error.message);
+        console.error(' שגיאה בשמירת התראת webhook:', error.message);
         return null;
     }
 }
 
-// עדכון סטטיסטיקות כתובת מעקב ספציפית (כתובת שקיבלה מייל)
-async function updateTrackedEmailStats(recipientEmail) {
+// עדכון סטטיסטיקות כתובת מעקב
+async function updateTrackedEmailStats(userEmail) {
     if (!db) return;
 
     try {
         const result = await db.collection('tracked_emails').updateOne(
-            { email: recipientEmail, isActive: true },
+            { email: userEmail.toLowerCase(), isActive: true },
             { 
                 $inc: { totalEmailsReceived: 1 },
                 $set: { 
@@ -532,21 +637,21 @@ async function updateTrackedEmailStats(recipientEmail) {
         );
         
         if (result.modifiedCount > 0) {
-            console.log('📊 עדכון סטטיסטיקות עבור כתובת שקיבלה מייל:', recipientEmail);
+            console.log(` עדכון סטטיסטיקות עבור ${userEmail}`);
         }
     } catch (error) {
-        console.error('❌ שגיאה בעדכון סטטיסטיקות כתובת מעקב:', error.message);
+        console.error(' שגיאה בעדכון סטטיסטיקות:', error.message);
     }
 }
 
 // ========== ENDPOINTS ==========
 
-// Endpoint להתחברות משתמש
+// Endpoint להתחברות כללית (ישן)
 app.get('/auth/login', (req, res) => {
     if (!validateEnvironmentVariables()) {
         return res.status(500).json({ 
             error: 'חסרים משתני סביבה',
-            note: 'בדקי את קובץ ה-.env'
+            note: 'בדק את קובץ ה-.env'
         });
     }
 
@@ -557,25 +662,16 @@ app.get('/auth/login', (req, res) => {
         `scope=${encodeURIComponent('https://graph.microsoft.com/Mail.Read offline_access')}&` +
         `response_mode=query`;
 
-    console.log('🔗 לחצי על הקישור הזה להתחברות:');
-    console.log(authUrl);
-
-    let note = 'ההתראות יגיעו ל-webhook.site שלך ויתחדשו אוטומטי';
-    if (isWebhookSiteUrl(WEBHOOK_URL)) {
-        note = '⚠️ webhook.site לא נתמך על ידי Microsoft Graph Push Notifications. השתמשי ב-ngrok, localhost.run או שרת משלך.';
-    }
-
     res.json({
-        message: 'לחצי על הקישור להתחברות',
-        authUrl: authUrl,
-        webhookUrl: WEBHOOK_URL,
-        note
+        message: 'השתמש ב-/api/tracked-emails להוספת כתובות עם הרשאה אוטומטית',
+        legacyAuthUrl: authUrl,
+        recommendedFlow: 'POST /api/tracked-emails -> authUrl -> auto subscription creation'
     });
 });
 
-// Callback עבור Authorization Code
+// Callback מעודכן עבור Authorization Code
 app.get('/auth/callback', async (req, res) => {
-    const { code, error, error_description } = req.query;
+    const { code, error, error_description, state } = req.query;
     
     if (error) {
         return res.status(400).json({ 
@@ -589,6 +685,31 @@ app.get('/auth/callback', async (req, res) => {
     }
     
     try {
+        // פענוח ה-state לזיהוי הכתובת
+        let targetEmail = null;
+        let isTrackingRequest = false;
+        
+        if (state) {
+            try {
+                const stateData = JSON.parse(Buffer.from(state, 'base64').toString());
+                if (stateData.email && stateData.action === 'track_email') {
+                    targetEmail = stateData.email;
+                    isTrackingRequest = true;
+                    console.log(' מעבד הרשאה עבור כתובת:', targetEmail);
+                }
+            } catch (stateError) {
+                console.log(' לא ניתן לפענח state');
+            }
+        }
+        
+        if (!isTrackingRequest) {
+            return res.status(400).json({ 
+                error: 'בקשה לא תקינה',
+                message: 'השתמש ב-API להוספת כתובות מעקב'
+            });
+        }
+        
+        // קבלת tokens
         const tokenResponse = await axios.post(
             `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`,
             new URLSearchParams({
@@ -606,21 +727,83 @@ app.get('/auth/callback', async (req, res) => {
             }
         );
         
-        currentAccessToken = tokenResponse.data.access_token;
-        currentRefreshToken = tokenResponse.data.refresh_token;
+        const accessToken = tokenResponse.data.access_token;
+        const refreshToken = tokenResponse.data.refresh_token;
+        const expiresIn = tokenResponse.data.expires_in;
+        const tokenExpiresAt = new Date(Date.now() + (expiresIn * 1000));
         
-        console.log('✅ התחברות הצליחה!');
+        console.log(' התחברות הצליחה עבור:', targetEmail);
         
-        const subscription = await createEmailSubscription(currentAccessToken);
-
-        res.json({ 
-            message: '🎉 הכל מוכן! המערכת תעקוב אחר מיילים מכתובות מוגדרות',
-            subscriptionId: subscription.id,
-            expiresAt: subscription.expirationDateTime,
-            autoRenewal: true
-        });
+        // עדכון הרשומה במונגו
+        await db.collection('tracked_emails').updateOne(
+            { email: targetEmail.toLowerCase() },
+            {
+                $set: {
+                    hasAuthorization: true,
+                    accessToken: accessToken,
+                    refreshToken: refreshToken,
+                    tokenExpiresAt: tokenExpiresAt,
+                    authorizationDate: new Date(),
+                    subscriptionStatus: 'authorized',
+                    updatedAt: new Date()
+                }
+            }
+        );
+        
+        console.log(' עודכן מצב הרשאה במונגו עבור:', targetEmail);
+        
+        // יצירת subscription עבור הכתובת
+        try {
+            const subscription = await createEmailSubscriptionForUser(accessToken, targetEmail);
+            
+            // עדכון subscription ID במונגו
+            await db.collection('tracked_emails').updateOne(
+                { email: targetEmail.toLowerCase() },
+                {
+                    $set: {
+                        subscriptionId: subscription.id,
+                        subscriptionExpiresAt: new Date(subscription.expirationDateTime),
+                        subscriptionStatus: 'active',
+                        updatedAt: new Date()
+                    }
+                }
+            );
+            
+            console.log(` מערכת מעקב הופעלה במלואה עבור ${targetEmail}!`);
+            
+            res.json({ 
+                message: ` מעקב הופעל עבור ${targetEmail}!`,
+                email: targetEmail,
+                subscriptionId: subscription.id,
+                expiresAt: subscription.expirationDateTime,
+                autoRenewal: true,
+                status: 'active'
+            });
+            
+        } catch (subscriptionError) {
+            console.error(' שגיאה ביצירת subscription:', subscriptionError.message);
+            
+            // עדכון סטטוס כשל
+            await db.collection('tracked_emails').updateOne(
+                { email: targetEmail.toLowerCase() },
+                {
+                    $set: {
+                        subscriptionStatus: 'subscription_failed',
+                        updatedAt: new Date()
+                    }
+                }
+            );
+            
+            res.status(500).json({
+                error: 'הרשאה הצליחה אבל יצירת subscription נכשלה',
+                email: targetEmail,
+                details: subscriptionError.message,
+                nextSteps: 'נסה ליצור subscription מחדש דרך ה-API'
+            });
+        }
+        
     } catch (error) {
-        console.error('❌ שגיאה בתהליך:', error.response?.data || error.message);
+        console.error(' שגיאה בתהליך:', error.response?.data || error.message);
         res.status(500).json({ 
             error: 'שגיאה בתהליך',
             details: error.response?.data || error.message
@@ -628,54 +811,79 @@ app.get('/auth/callback', async (req, res) => {
     }
 });
 
-// ✨ ENDPOINT עיקרי לקבלת התראות מ-Microsoft Graph ✨
+// Endpoint עיקרי לקבלת התראות מ-Microsoft Graph (מעודכן למרובי משתמשים)
 app.post('/webhooks/microsoft-graph', async (req, res) => {
-    console.log('\n🚨 ======== התראת מייל חדשה ========');
-    console.log('📨 קיבלנו בקשה ב-webhook endpoint');
-    console.log('⏰ זמן:', new Date().toLocaleString('he-IL'));
+    console.log('\n ======== התראת מייל חדשה ========');
+    console.log(' קיבלנו בקשה ב-webhook endpoint');
+    console.log(' זמן:', new Date().toLocaleString('he-IL'));
     
     const { validationToken } = req.query;
     
-    // Microsoft Graph שולח validation token בפעם הראשונה
     if (validationToken) {
-        console.log('🔍 מאמת webhook עם Microsoft Graph...');
-        console.log('✅ Validation token:', validationToken);
-        console.log('📤 מחזיר validation token ל-Microsoft Graph');
+        console.log(' מאמת webhook עם Microsoft Graph...');
+        console.log(' Validation token:', validationToken);
         return res.status(200).type('text/plain').send(validationToken);
     }
     
-    // עיבוד התראות אמיתיות על מיילים חדשים
     const notifications = req.body?.value || [];
-    console.log(`📬 התקבלו ${notifications.length} התראות מייל חדשות!`);
+    console.log(` התקבלו ${notifications.length} התראות מייל חדשות!`);
     
     for (let i = 0; i < notifications.length; i++) {
         const notification = notifications[i];
         const messageId = notification.resource.split('/Messages/')[1] || 'unknown';
         
+        // זיהוי המשתמש על בסיס clientState
+        let targetUserEmail = 'unknown';
+        if (notification.clientState && notification.clientState.includes('_')) {
+            const parts = notification.clientState.split('_');
+            if (parts.length > 1) {
+                targetUserEmail = parts[1];
+            }
+        }
+        
+        console.log(`\n === עיבוד מייל ${i + 1} עבור ${targetUserEmail} ===`);
+        console.log(' Subscription ID:', notification.subscriptionId);
+        console.log(' Resource:', notification.resource);
+        console.log(' Message ID:', messageId);
+        
+        if (targetUserEmail === 'unknown' || messageId === 'unknown') {
+            console.log(' לא ניתן לזהות משתמש או message ID - מדלג');
+            continue;
+        }
+        
+        // קבלת access token עבור המשתמש
+        const userToken = await getValidAccessTokenForUser(targetUserEmail);
+        if (!userToken) {
+            console.log(` לא ניתן לקבל access token עבור ${targetUserEmail} - מדלג`);
+            continue;
+        }
+        
+        // קבלת פרטי המייל
+        const emailDetails = await getEmailDetails(messageId, userToken);
+        if (!emailDetails) {
+            console.log(` לא ניתן לקבל פרטי מייל עבור ${targetUserEmail} - מדלג`);
+            continue;
+        }
+        
+        // שמירה ושליחת webhook
         const notificationData = {
             subscriptionId: notification.subscriptionId,
             resource: notification.resource,
             changeType: notification.changeType,
             clientState: notification.clientState,
-            timestamp: new Date().toLocaleString('he-IL'),
-            receivedAt: new Date(),
             messageId: messageId
         };
         
-        console.log(`\n📧 === עיבוד מייל ${i + 1} ===`);
-        console.log('📋 פרטי התראה:', notificationData);
-        
-        // שמירת ההתראה (עם בדיקת כתובות מעקב ושליחת webhook)
-        const savedId = await saveWebhookNotification(notificationData);
+        const savedId = await saveWebhookNotificationForUser(notificationData, emailDetails, targetUserEmail);
         
         if (savedId) {
-            console.log(`✅ מייל ${i + 1} נשמר ונשלח בהצלחה! DB ID: ${savedId}`);
+            console.log(` מייל ${i + 1} עבור ${targetUserEmail} נשמר ונשלח בהצלחה! DB ID: ${savedId}`);
         } else {
-            console.log(`⚠️ מייל ${i + 1} לא עובד בדיקות המעקב - לא נשמר`);
+            console.log(` כשל בעיבוד מייל ${i + 1} עבור ${targetUserEmail}`);
         }
     }
     
-    console.log('🎯 ======== סיום עיבוד התראות ========\n');
+    console.log(' ======== סיום עיבוד התראות ========\n');
     res.status(202).send('OK');
 });
 
@@ -688,12 +896,13 @@ app.get('/webhooks/microsoft-graph', (req, res) => {
     }
     
     res.json({ 
-        message: 'Webhook endpoint פועל',
-        timestamp: new Date().toLocaleString('he-IL')
+        message: 'Webhook endpoint פועל - מערכת מרובת משתמשים',
+        timestamp: new Date().toLocaleString('he-IL'),
+        version: 'multi-user-v1'
     });
 });
 
-// ========== כתובות מעקב ENDPOINTS ==========
+// ========== כתובות מעקב ENDPOINTS - מעודכן ==========
 
 // קבלת כל הכתובות במעקב
 app.get('/api/tracked-emails', async (req, res) => {
@@ -707,17 +916,30 @@ app.get('/api/tracked-emails', async (req, res) => {
             .sort({ addedAt: -1 })
             .toArray();
 
+        // הוספת authUrl לכתובות שלא אושרו
+        const emailsWithUrls = trackedEmails.map(email => ({
+            ...email,
+            authUrl: email.hasAuthorization ? null : generateAuthUrlForEmail(email.email),
+            needsAction: !email.hasAuthorization || email.subscriptionStatus !== 'active'
+        }));
+
         res.json({
-            trackedEmails: trackedEmails,
-            totalCount: trackedEmails.length
+            trackedEmails: emailsWithUrls,
+            totalCount: trackedEmails.length,
+            summary: {
+                total: trackedEmails.length,
+                authorized: trackedEmails.filter(e => e.hasAuthorization).length,
+                activeSubscriptions: trackedEmails.filter(e => e.subscriptionStatus === 'active').length,
+                needingAction: trackedEmails.filter(e => !e.hasAuthorization || e.subscriptionStatus !== 'active').length
+            }
         });
     } catch (error) {
-        console.error('❌ שגיאה בקבלת כתובות מעקב:', error.message);
+        console.error(' שגיאה בקבלת כתובות מעקב:', error.message);
         res.status(500).json({ error: 'שגיאה בקבלת כתובות מעקב' });
     }
 });
 
-// הוספת כתובת מייל למעקב
+// הוספת כתובת מייל למעקב - מעודכן
 app.post('/api/tracked-emails', async (req, res) => {
     if (!db) {
         return res.status(500).json({ error: 'אין חיבור למונגו DB' });
@@ -730,7 +952,6 @@ app.post('/api/tracked-emails', async (req, res) => {
             return res.status(400).json({ error: 'כתובת מייל חובה' });
         }
 
-        // בדיקת פורמט מייל
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
             return res.status(400).json({ error: 'כתובת מייל לא תקינה' });
@@ -739,29 +960,63 @@ app.post('/api/tracked-emails', async (req, res) => {
         // בדיקה שהכתובת לא קיימת כבר
         const existingEmail = await db.collection('tracked_emails').findOne({ email: email.toLowerCase() });
         if (existingEmail) {
-            return res.status(409).json({ error: 'כתובת מייל כבר קיימת במעקב' });
+            return res.status(409).json({ 
+                error: 'כתובת מייל כבר קיימת במעקב',
+                existingEmail: existingEmail,
+                authUrl: existingEmail.hasAuthorization ? null : generateAuthUrlForEmail(email)
+            });
         }
 
+        // יצירת רשומה עם מבנה מעודכן
         const trackedEmail = {
             email: email.toLowerCase(),
             description: description || '',
             isActive: isActive,
+            
+            // OAuth fields
+            hasAuthorization: false,
+            accessToken: null,
+            refreshToken: null,
+            tokenExpiresAt: null,
+            authorizationDate: null,
+            
+            // Subscription fields
+            subscriptionId: null,
+            subscriptionExpiresAt: null,
+            subscriptionStatus: 'pending_authorization',
+            
+            // Statistics
             addedAt: new Date(),
             lastEmailReceived: null,
             totalEmailsReceived: 0,
-            createdBy: 'system',
+            createdBy: 'api',
             updatedAt: new Date()
         };
 
         const result = await db.collection('tracked_emails').insertOne(trackedEmail);
         
-        console.log('✅ כתובת מייל נוספה למעקב:', email);
+        // יצירת URL הרשאה
+        const authUrl = generateAuthUrlForEmail(email);
+        
+        console.log(' כתובת מייל נוספה למעקב (ממתינה להרשאה):', email);
+        console.log(' Authorization URL:', authUrl);
+
+        
+        
         res.status(201).json({
-            message: 'כתובת מייל נוספה בהצלחה למעקב',
-            trackedEmail: { ...trackedEmail, _id: result.insertedId }
+            success: true,
+            message: 'כתובת מייל נוספה למעקב - נדרשת הרשאה',
+            trackedEmail: { ...trackedEmail, _id: result.insertedId },
+            authUrl: authUrl,
+            nextSteps: [
+                '1. שלח את ה-authUrl למשתמש',
+                '2. המשתמש נכנס לקישור ומאשר גישה',
+                '3. המערכת תיצור subscription אוטומטית',
+                '4. בדוק סטטוס ב-GET /api/tracked-emails'
+            ]
         });
     } catch (error) {
-        console.error('❌ שגיאה בהוספת כתובת למעקב:', error.message);
+        console.error(' שגיאה בהוספת כתובת למעקב:', error.message);
         res.status(500).json({ error: 'שגיאה בהוספת כתובת למעקב' });
     }
 });
@@ -798,9 +1053,12 @@ app.put('/api/tracked-emails/:id', async (req, res) => {
             return res.status(404).json({ error: 'כתובת מייל לא נמצאה' });
         }
 
-        res.json({ message: 'כתובת מייל עודכנה בהצלחה' });
+        res.json({ 
+            success: true,
+            message: 'כתובת מייל עודכנה בהצלחה' 
+        });
     } catch (error) {
-        console.error('❌ שגיאה בעדכון כתובת מייל:', error.message);
+        console.error(' שגיאה בעדכון כתובת מייל:', error.message);
         res.status(500).json({ error: 'שגיאה בעדכון כתובת מייל' });
     }
 });
@@ -814,22 +1072,97 @@ app.delete('/api/tracked-emails/:id', async (req, res) => {
     try {
         const { id } = req.params;
 
-        const result = await db.collection('tracked_emails').deleteOne(
-            { _id: new ObjectId(id) }
-        );
+        // קבלת פרטי הכתובת לפני מחיקה
+        const emailDoc = await db.collection('tracked_emails').findOne({ _id: new ObjectId(id) });
+        if (!emailDoc) {
+            return res.status(404).json({ error: 'כתובת מייל לא נמצאה' });
+        }
+
+        // מחיקת subscription אם קיים
+        if (emailDoc.subscriptionId) {
+            try {
+                await deleteSubscriptionForUser(emailDoc.subscriptionId, emailDoc.email);
+                console.log(`🗑️ Subscription נמחק עבור ${emailDoc.email}`);
+            } catch (subError) {
+                console.error(` לא ניתן למחוק subscription עבור ${emailDoc.email}:`, subError.message);
+            }
+        }
+
+        // מחיקת הכתובת
+        const result = await db.collection('tracked_emails').deleteOne({ _id: new ObjectId(id) });
 
         if (result.deletedCount === 0) {
             return res.status(404).json({ error: 'כתובת מייל לא נמצאה' });
         }
 
-        res.json({ message: 'כתובת מייל הוסרה בהצלחה מהמעקב' });
+        console.log(` כתובת ${emailDoc.email} הוסרה מהמעקב`);
+        res.json({ 
+            success: true,
+            message: 'כתובת מייל הוסרה בהצלחה מהמעקב',
+            deletedEmail: emailDoc.email
+        });
     } catch (error) {
-        console.error('❌ שגיאה במחיקת כתובת מייל:', error.message);
+        console.error(' שגיאה במחיקת כתובת מייל:', error.message);
         res.status(500).json({ error: 'שגיאה במחיקת כתובת מייל' });
     }
 });
 
-// סטטיסטיקות כתובות במעקב
+// Endpoint להפעלה מחדש של הרשאה
+app.post('/api/tracked-emails/:id/reauthorize', async (req, res) => {
+    if (!db) {
+        return res.status(500).json({ error: 'אין חיבור למונגו DB' });
+    }
+
+    try {
+        const { id } = req.params;
+        const email = await db.collection('tracked_emails').findOne({ _id: new ObjectId(id) });
+        
+        if (!email) {
+            return res.status(404).json({ error: 'כתובת מייל לא נמצאה' });
+        }
+
+        // מחיקת subscription ישן אם קיים
+        if (email.subscriptionId) {
+            try {
+                await deleteSubscriptionForUser(email.subscriptionId, email.email);
+            } catch (error) {
+                console.log(' לא ניתן למחוק subscription ישן');
+            }
+        }
+
+        // איפוס נתוני הרשאה
+        await db.collection('tracked_emails').updateOne(
+            { _id: new ObjectId(id) },
+            {
+                $set: {
+                    hasAuthorization: false,
+                    accessToken: null,
+                    refreshToken: null,
+                    tokenExpiresAt: null,
+                    authorizationDate: null,
+                    subscriptionId: null,
+                    subscriptionExpiresAt: null,
+                    subscriptionStatus: 'pending_reauthorization',
+                    updatedAt: new Date()
+                }
+            }
+        );
+
+        const authUrl = generateAuthUrlForEmail(email.email);
+        
+        res.json({
+            success: true,
+            message: 'קישור הרשאה חדש נוצר',
+            email: email.email,
+            authUrl: authUrl
+        });
+    } catch (error) {
+        console.error(' שגיאה ביצירת הרשאה מחדש:', error.message);
+        res.status(500).json({ error: 'שגיאה ביצירת הרשאה מחדש' });
+    }
+});
+
+// סטטיסטיקות כתובות במעקב - מעודכן
 app.get('/api/tracked-emails/stats', async (req, res) => {
     if (!db) {
         return res.status(500).json({ error: 'אין חיבור למונגו DB' });
@@ -842,28 +1175,104 @@ app.get('/api/tracked-emails/stats', async (req, res) => {
                     _id: null,
                     totalTracked: { $sum: 1 },
                     activeTracked: { $sum: { $cond: ['$isActive', 1, 0] } },
-                    inactiveTracked: { $sum: { $cond: ['$isActive', 0, 1] } },
+                    authorizedUsers: { $sum: { $cond: ['$hasAuthorization', 1, 0] } },
+                    activeSubscriptions: { $sum: { $cond: [{ $eq: ['$subscriptionStatus', 'active'] }, 1, 0] } },
                     totalEmailsReceived: { $sum: '$totalEmailsReceived' }
+                }
+            }
+        ]).toArray();
+
+        const subscriptionStats = await db.collection('subscriptions').aggregate([
+            {
+                $group: {
+                    _id: '$status',
+                    count: { $sum: 1 }
                 }
             }
         ]).toArray();
 
         const webhookStats = await db.collection('webhook_notifications').countDocuments();
 
+        const statusBreakdown = await db.collection('tracked_emails').aggregate([
+            {
+                $group: {
+                    _id: '$subscriptionStatus',
+                    count: { $sum: 1 }
+                }
+            }
+        ]).toArray();
+
         const result = {
-            general: emailStats[0] || {
+            emailTracking: emailStats[0] || {
                 totalTracked: 0,
                 activeTracked: 0,
-                inactiveTracked: 0,
+                authorizedUsers: 0,
+                activeSubscriptions: 0,
                 totalEmailsReceived: 0
             },
+            subscriptionsByStatus: subscriptionStats.reduce((acc, curr) => {
+                acc[curr._id] = curr.count;
+                return acc;
+            }, {}),
+            emailStatusBreakdown: statusBreakdown.reduce((acc, curr) => {
+                acc[curr._id] = curr.count;
+                return acc;
+            }, {}),
             totalWebhookNotifications: webhookStats
         };
 
         res.json(result);
     } catch (error) {
-        console.error('❌ שגיאה בקבלת סטטיסטיקות:', error.message);
+        console.error(' שגיאה בקבלת סטטיסטיקות:', error.message);
         res.status(500).json({ error: 'שגיאה בקבלת סטטיסטיקות' });
+    }
+});
+
+// Endpoint לקבלת מצב הרשאות
+app.get('/api/tracked-emails/authorization-status', async (req, res) => {
+    if (!db) {
+        return res.status(500).json({ error: 'אין חיבור למונגו DB' });
+    }
+
+    try {
+        const emails = await db.collection('tracked_emails')
+            .find({})
+            .project({
+                email: 1,
+                hasAuthorization: 1,
+                subscriptionStatus: 1,
+                subscriptionId: 1,
+                authorizationDate: 1,
+                subscriptionExpiresAt: 1,
+                totalEmailsReceived: 1,
+                lastEmailReceived: 1,
+                tokenExpiresAt: 1
+            })
+            .sort({ addedAt: -1 })
+            .toArray();
+
+        // הוספת URL הרשאה לכתובות שלא אושרו
+        const emailsWithAuthUrls = emails.map(email => ({
+            ...email,
+            authUrl: email.hasAuthorization ? null : generateAuthUrlForEmail(email.email),
+            needsAuthorization: !email.hasAuthorization,
+            needsAction: !email.hasAuthorization || email.subscriptionStatus !== 'active',
+            tokenExpiresSoon: email.tokenExpiresAt ? (new Date(email.tokenExpiresAt) - new Date()) < (24 * 60 * 60 * 1000) : false
+        }));
+
+        res.json({
+            emails: emailsWithAuthUrls,
+            summary: {
+                total: emails.length,
+                authorized: emails.filter(e => e.hasAuthorization).length,
+                pending: emails.filter(e => !e.hasAuthorization).length,
+                activeSubscriptions: emails.filter(e => e.subscriptionStatus === 'active').length,
+                needingAction: emails.filter(e => !e.hasAuthorization || e.subscriptionStatus !== 'active').length
+            }
+        });
+    } catch (error) {
+        console.error(' שגיאה בקבלת מצב הרשאות:', error.message);
+        res.status(500).json({ error: 'שגיאה בקבלת מצב הרשאות' });
     }
 });
 
@@ -879,15 +1288,21 @@ app.get('/api/webhook-notifications', async (req, res) => {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
+        const userEmail = req.query.user;
+
+        let filter = {};
+        if (userEmail) {
+            filter.trackedUserEmail = userEmail.toLowerCase();
+        }
 
         const notifications = await db.collection('webhook_notifications')
-            .find({})
+            .find(filter)
             .sort({ receivedAt: -1 })
             .skip(skip)
             .limit(limit)
             .toArray();
 
-        const totalCount = await db.collection('webhook_notifications').countDocuments();
+        const totalCount = await db.collection('webhook_notifications').countDocuments(filter);
 
         res.json({
             notifications: notifications,
@@ -895,22 +1310,23 @@ app.get('/api/webhook-notifications', async (req, res) => {
                 currentPage: page,
                 totalPages: Math.ceil(totalCount / limit),
                 totalCount: totalCount
-            }
+            },
+            filter: userEmail ? { userEmail } : null
         });
     } catch (error) {
-        console.error('❌ שגיאה בקבלת התראות:', error.message);
+        console.error(' שגיאה בקבלת התראות:', error.message);
         res.status(500).json({ error: 'שגיאה בקבלת התראות' });
     }
 });
 
-// חיפוש התראות לפי שולח
+// חיפוש התראות
 app.get('/api/webhook-notifications/search', async (req, res) => {
     if (!db) {
         return res.status(500).json({ error: 'אין חיבור למונגו DB' });
     }
 
     try {
-        const { sender, subject } = req.query;
+        const { sender, subject, user } = req.query;
         const filter = {};
 
         if (sender) {
@@ -918,6 +1334,9 @@ app.get('/api/webhook-notifications/search', async (req, res) => {
         }
         if (subject) {
             filter.subject = { $regex: subject, $options: 'i' };
+        }
+        if (user) {
+            filter.trackedUserEmail = { $regex: user, $options: 'i' };
         }
 
         const notifications = await db.collection('webhook_notifications')
@@ -928,10 +1347,11 @@ app.get('/api/webhook-notifications/search', async (req, res) => {
 
         res.json({
             notifications: notifications,
-            count: notifications.length
+            count: notifications.length,
+            searchCriteria: { sender, subject, user }
         });
     } catch (error) {
-        console.error('❌ שגיאה בחיפוש התראות:', error.message);
+        console.error(' שגיאה בחיפוש התראות:', error.message);
         res.status(500).json({ error: 'שגיאה בחיפוש התראות' });
     }
 });
@@ -952,7 +1372,8 @@ app.get('/api/subscriptions', async (req, res) => {
 
         res.json({
             subscriptions: subs,
-            activeCount: subs.filter(s => s.status === 'active').length
+            activeCount: subs.filter(s => s.status === 'active').length,
+            totalCount: subs.length
         });
     } catch (error) {
         res.status(500).json({ error: 'שגיאה בקבלת subscriptions' });
@@ -963,10 +1384,24 @@ app.get('/api/subscriptions', async (req, res) => {
 app.post('/api/subscriptions/:id/renew', async (req, res) => {
     try {
         const { id } = req.params;
-        await renewSubscription(id);
-        res.json({ message: 'Subscription חודש בהצלחה' });
+        
+        // מציאת ה-subscription במונגו
+        const subscription = await db.collection('subscriptions').findOne({ subscriptionId: id });
+        if (!subscription) {
+            return res.status(404).json({ error: 'Subscription לא נמצא' });
+        }
+        
+        await renewSubscriptionForUser(id, subscription.userEmail);
+        res.json({ 
+            success: true,
+            message: 'Subscription חודש בהצלחה',
+            userEmail: subscription.userEmail
+        });
     } catch (error) {
-        res.status(500).json({ error: 'שגיאה בחידוש subscription' });
+        res.status(500).json({ 
+            error: 'שגיאה בחידוש subscription',
+            details: error.message
+        });
     }
 });
 
@@ -974,10 +1409,24 @@ app.post('/api/subscriptions/:id/renew', async (req, res) => {
 app.delete('/api/subscriptions/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        await deleteSubscription(id);
-        res.json({ message: 'Subscription נמחק בהצלחה' });
+        
+        // מציאת ה-subscription במונגו
+        const subscription = await db.collection('subscriptions').findOne({ subscriptionId: id });
+        if (!subscription) {
+            return res.status(404).json({ error: 'Subscription לא נמצא' });
+        }
+        
+        await deleteSubscriptionForUser(id, subscription.userEmail);
+        res.json({ 
+            success: true,
+            message: 'Subscription נמחק בהצלחה',
+            userEmail: subscription.userEmail
+        });
     } catch (error) {
-        res.status(500).json({ error: 'שגיאה במחיקת subscription' });
+        res.status(500).json({ 
+            error: 'שגיאה במחיקת subscription',
+            details: error.message
+        });
     }
 });
 
@@ -991,9 +1440,10 @@ app.post('/api/test-webhook', async (req, res) => {
         const testData = {
             type: 'test_notification',
             timestamp: new Date().toISOString(),
-            message: 'זוהי בדיקת חיבור מהשרת',
-            source: 'Manual Test',
-            testId: Date.now()
+            message: 'בדיקת חיבור מהשרת - מערכת מרובת משתמשים',
+            source: 'Manual Test - Multi User System',
+            testId: Date.now(),
+            version: 'multi-user-v1'
         };
 
         const webhookSent = await sendToWebhookSite(testData);
@@ -1015,21 +1465,47 @@ app.post('/api/test-webhook', async (req, res) => {
     }
 });
 
-// Endpoint לבדיקת מצב השרות
-app.get('/health', (req, res) => {
-    const activeSubscriptions = Array.from(subscriptions.values()).filter(s => s.status === 'active');
+// Endpoint לבדיקת מצב השרות - מעודכן
+app.get('/health', async (req, res) => {
+    let trackedEmailsStats = null;
+    let activeSubscriptionsCount = 0;
+    
+    if (db) {
+        try {
+            const stats = await db.collection('tracked_emails').aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        total: { $sum: 1 },
+                        authorized: { $sum: { $cond: ['$hasAuthorization', 1, 0] } },
+                        active: { $sum: { $cond: [{ $eq: ['$subscriptionStatus', 'active'] }, 1, 0] } }
+                    }
+                }
+            ]).toArray();
+            
+            trackedEmailsStats = stats[0] || { total: 0, authorized: 0, active: 0 };
+            activeSubscriptionsCount = await db.collection('subscriptions').countDocuments({ status: 'active' });
+        } catch (error) {
+            console.error('שגיאה בקבלת סטטיסטיקות health:', error.message);
+        }
+    }
     
     res.json({ 
-        status: 'השרת רץ בהצלחה', 
+        status: 'השרת רץ בהצלחה - מערכת מרובת משתמשים',
+        version: 'multi-user-v1',
         timestamp: new Date().toLocaleString('he-IL'),
         webhookUrl: WEBHOOK_URL,
         webhookSiteUrl: WEBHOOK_SITE_URL,
-        hasActiveSubscription: activeSubscriptions.length > 0,
-        activeSubscriptions: activeSubscriptions.length,
-        totalSubscriptions: subscriptions.size,
+        
+        // סטטיסטיקות מעודכנות
+        trackedEmails: trackedEmailsStats,
+        subscriptions: {
+            active: activeSubscriptionsCount,
+            total: subscriptions.size
+        },
+        
+        // מצב מערכת
         mongoDbConnected: !!db,
-        hasAccessToken: !!currentAccessToken,
-        hasRefreshToken: !!currentRefreshToken,
         environment: {
             hasClientId: !!CLIENT_ID,
             hasTenantId: !!TENANT_ID,
@@ -1048,7 +1524,7 @@ async function startServer() {
     const mongoConnected = await connectToMongoDB();
     
     if (!mongoConnected) {
-        console.error('❌ לא ניתן להתחבר למונגו DB');
+        console.error(' לא ניתן להתחבר למונגו DB');
         process.exit(1);
     }
 
@@ -1060,51 +1536,67 @@ async function startServer() {
         
         for (const sub of existingSubscriptions) {
             subscriptions.set(sub.subscriptionId, sub);
-            scheduleSubscriptionRenewal(sub.subscriptionId, sub.expirationDateTime);
+            
+            // תזמון חידוש עם פרטי המשתמש
+            if (sub.userEmail) {
+                scheduleSubscriptionRenewal(sub.subscriptionId, sub.expirationDateTime, sub.userEmail);
+            }
         }
         
-        console.log(`📧 נטענו ${existingSubscriptions.length} subscriptions קיימים`);
+        console.log(` נטענו ${existingSubscriptions.length} subscriptions קיימים`);
+        
+        // טעינת כתובות מעוקבות
+        const trackedEmails = await db.collection('tracked_emails')
+            .find({ isActive: true })
+            .toArray();
+        
+        console.log(` נמצאו ${trackedEmails.length} כתובות במעקב`);
+        console.log(`   - מאושרות: ${trackedEmails.filter(e => e.hasAuthorization).length}`);
+        console.log(`   - subscriptions פעילים: ${trackedEmails.filter(e => e.subscriptionStatus === 'active').length}`);
+        
     } catch (error) {
-        console.error('❌ שגיאה בטעינת subscriptions:', error.message);
+        console.error(' שגיאה בטעינת נתונים:', error.message);
     }
 
     app.listen(PORT, () => {
-        console.log(`🚀 השרת רץ על פורט ${PORT}`);
-        console.log(`📍 ההתראות יגיעו ל: ${WEBHOOK_URL}`);
-        console.log(`🌐 התחברות: http://localhost:${PORT}/auth/login`);
-        console.log(`📊 סטטוס: http://localhost:${PORT}/health`);
-        console.log(`📧 ניהול כתובות: http://localhost:${PORT}/api/tracked-emails`);
-        console.log(`📨 התראות: http://localhost:${PORT}/api/webhook-notifications`);
-        console.log(`🧪 בדיקת webhook: http://localhost:${PORT}/api/test-webhook`);
-        
-        if (WEBHOOK_SITE_URL) {
-            console.log(`📱 Webhook.site: ${WEBHOOK_SITE_URL}`);
-        }
-        
-        console.log('\n📋 שלבים הבאים:');
-        console.log('1. התחבר: GET /auth/login');
-        console.log('2. בדוק שיש subscriptions: GET /api/subscriptions');
-        console.log('3. בדוק כתובות מעקב: GET /api/tracked-emails');
-        console.log('4. בדוק webhook: POST /api/test-webhook');
-        console.log('5. שלח מייל ממייל מעוקב');
-        console.log('6. צפה בהתראות: GET /api/webhook-notifications');
-        
-        if (!validateEnvironmentVariables()) {
-            console.log('\n⚠️  עדכן את קובץ ה-.env לפני שתמשיך!');
-        }
+        console.log(`
+ ===== מערכת מעקב מיילים מרובת משתמשים =====
+ השרת רץ על פורט ${PORT}
+ התראות יגיעו ל: ${WEBHOOK_URL}
+
+    Endpoints עיקריים:
+    סטטוס מערכת: http://localhost:${PORT}/health
+    ניהול כתובות: http://localhost:${PORT}/api/tracked-emails  
+    מצב הרשאות: http://localhost:${PORT}/api/tracked-emails/authorization-status
+    התראות: http://localhost:${PORT}/api/webhook-notifications
+    Subscriptions: http://localhost:${PORT}/api/subscriptions
+    בדיקת webhook: http://localhost:${PORT}/api/test-webhook
+
+   תהליך הפעלה:
+   1. הוסף כתובת: POST /api/tracked-emails
+   2. שלח למשתמש את ה-authUrl שמתקבל
+   3. המשתמש נכנס לקישור ומאשר גישה
+   4. המערכת תיצור subscription אוטומטית
+   5. בדוק מצב: GET /api/tracked-emails/authorization-status
+   6. שלח מיילים ותראה התראות ב-webhook
+
+${WEBHOOK_SITE_URL ? `📱 Webhook.site: ${WEBHOOK_SITE_URL}` : ''}
+
+${!validateEnvironmentVariables() ? '  עדכן את קובץ ה-.env לפני שתמשיך!' : ' משתני סביבה תקינים'}
+`);
     });
 }
 
 // סגירה נכונה של חיבור מונגו
 process.on('SIGINT', async () => {
-    console.log('\n🔄 סוגר את השרת...');
+    console.log('\n סוגר את השרת...');
     
     // ניקוי intervals
     refreshIntervals.forEach(interval => clearTimeout(interval));
     
     if (mongoClient) {
         await mongoClient.close();
-        console.log('✅ חיבור מונגו DB נסגר');
+        console.log(' חיבור מונגו DB נסגר');
     }
     process.exit(0);
 });
