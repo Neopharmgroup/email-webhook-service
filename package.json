@@ -4,7 +4,7 @@
   "description": "",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js",
+    "start": "nodemon app.js",
     "dev": "nodemon app.js",
     "dev:watch": "nodemon --watch . --ext js,json,env app.js",
     "dev:debug": "nodemon --inspect app.js",
@@ -20,8 +20,10 @@
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "axios": "^1.11.0",
     "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "mongoose": "^8.18.0",
     "node-fetch": "^3.3.2"
   },
   "devDependencies": {
