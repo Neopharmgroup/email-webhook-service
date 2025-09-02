@@ -137,9 +137,6 @@ npm run dev:debug
 # production mode
 npm run prod
 
-# Docker
-npm run docker:build
-npm run docker:run
 ```
 
 ## 📖 תיעוד נוסף
@@ -210,9 +207,6 @@ curl http://localhost:8080/webhooks/microsoft-graph
 4. Push ל-branch (`git push origin feature/amazing-feature`)
 5. פתח Pull Request
 
-## 📄 רישיון
-
-הפרויקט ברישיון ISC - ראה [LICENSE](LICENSE) לפרטים.
 
 ---
 
