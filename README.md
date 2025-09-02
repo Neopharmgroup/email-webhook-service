@@ -157,15 +157,6 @@ npm run prod
 https://your-domain.com/webhooks/microsoft-graph
 ```
 
-## 🐳 Docker
-
-```bash
-# Build
-docker build -t email-webhook-service .
-
-# Run
-docker run -p 8080:8080 -e NODE_ENV=production email-webhook-service
-```
 
 ## 🔍 בדיקת תקינות
 
