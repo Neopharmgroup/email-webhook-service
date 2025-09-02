@@ -1,30 +1,46 @@
 {
   "name": "email-webhook",
-  "version": "1.0.0",
-  "description": "",
-  "main": "app.js",
+  "version": "2.0.0",
+  "description": "Microsoft Graph Email Monitoring Microservice with Clean Architecture",
+  "main": "src/app.js",
   "scripts": {
-    "start": "nodemon app.js",
-    "dev": "nodemon app.js",
-    "dev:watch": "nodemon --watch . --ext js,json,env app.js",
-    "dev:debug": "nodemon --inspect app.js",
-    "dev:verbose": "nodemon --verbose app.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "dev:watch": "nodemon --watch src --ext js,json,env src/app.js",
+    "dev:debug": "nodemon --inspect src/app.js",
+    "dev:verbose": "nodemon --verbose src/app.js",
+    "prod": "NODE_ENV=production node src/app.js",
+    "legacy": "node app.js",
+    "migrate": "node src/utils/migrate.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "echo \"Linting not configured\" && exit 0",
+    "docker:build": "docker build -t email-webhook-service .",
+    "docker:run": "docker run -p 8080:8080 email-webhook-service"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "microservice",
+    "email-monitoring",
+    "microsoft-graph",
+    "webhook",
+    "azure",
+    "nodejs",
+    "express",
+    "mongodb"
+  ],
+  "author": "Neopharm",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
   "dependencies": {
-    "@azure/msal-node": "^3.7.1",
-    "@microsoft/microsoft-graph-client": "^3.0.7",
-    "axios": "^1.11.0",
-    "body-parser": "^2.2.0",
+    "axios": "^1.7.0",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.1",
-    "express": "^5.1.0",
-    "mongoose": "^8.18.0",
-    "node-fetch": "^3.3.2"
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "mongodb": "^6.0.0",
+    "winston": "^3.10.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
