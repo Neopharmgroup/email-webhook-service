@@ -28,18 +28,18 @@ class EmailWebhookService {
         try {
             // Initialize database connection
             await this.initializeDatabase();
-            
+
             // Setup middleware
             this.setupMiddleware();
-            
+
             // Setup routes
             this.setupRoutes();
-            
+
             // Setup error handling
             this.setupErrorHandling();
-            
+
             logger.info('✅ Email Webhook Service initialized successfully');
-            
+
         } catch (error) {
             logger.error('❌ Failed to initialize Email Webhook Service', error);
             process.exit(1);
@@ -65,24 +65,24 @@ class EmailWebhookService {
 
         // CORS
         this.app.use(corsMiddleware);
-        
+
         // Body parsing
         this.app.use(express.json({ limit: '10mb' }));
         this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-        
+
         // Request logging
         this.app.use(requestLogger);
-        
+
         logger.info('🔧 Middleware configured');
     }
 
     setupRoutes() {
         // API routes
         this.app.use('/api', routes);
-        
+
         // Legacy compatibility routes (for backward compatibility)
         this.setupLegacyRoutes();
-        
+
         // Root endpoint
         this.app.get('/', (req, res) => {
             res.json({
@@ -96,35 +96,34 @@ class EmailWebhookService {
                 timestamp: new Date().toISOString()
             });
         });
-        
+
         logger.info('🛣️ Routes configured');
     }
 
     setupLegacyRoutes() {
         // Legacy routes for backward compatibility
         const { MonitoredEmailController, SubscriptionController, WebhookController } = require('./controllers');
-        
         // Legacy monitored emails routes
         this.app.post('/monitored-emails', MonitoredEmailController.addEmail);
         this.app.get('/monitored-emails', MonitoredEmailController.getEmails);
         this.app.patch('/monitored-emails/:email/status', MonitoredEmailController.updateEmailStatus);
         this.app.delete('/monitored-emails/:email', MonitoredEmailController.removeEmail);
         this.app.get('/monitored-emails/:email/subscription/status', SubscriptionController.getEmailSubscriptionStatus);
-        
+
         // Legacy subscription routes
         this.app.post('/monitored-emails/:email/subscription', SubscriptionController.createSubscription);
         this.app.post('/create-subscriptions', SubscriptionController.createSubscriptionsForWaiting);
         this.app.get('/subscriptions', SubscriptionController.getActiveSubscriptions);
-        
+
         // Legacy webhook routes
         this.app.post('/webhooks/microsoft-graph', WebhookController.handleWebhook);
         this.app.get('/webhooks/microsoft-graph', WebhookController.handleWebhookGet);
-        
+
         // Legacy dashboard routes
         this.app.get('/dashboard/stats', require('./controllers/DashboardController').getStatistics);
         this.app.get('/audit-logs', require('./controllers/AuditController').getAuditLogs);
         this.app.get('/notifications', require('./controllers/NotificationController').getRecentNotifications);
-        
+
         logger.info('🔄 Legacy routes configured for backward compatibility');
     }
 
@@ -139,24 +138,24 @@ class EmailWebhookService {
                 timestamp: new Date().toISOString()
             });
         });
-        
+
         // Global error handler
         this.app.use(errorHandler);
-        
+
         logger.info('🛡️ Error handling configured');
     }
 
     async start() {
         try {
             const port = config.port;
-            
+
             this.server = this.app.listen(port, () => {
                 this.logStartupInfo(port);
             });
-            
+
             // Graceful shutdown handlers
             this.setupGracefulShutdown();
-            
+
         } catch (error) {
             logger.error('❌ Failed to start server', error);
             process.exit(1);
@@ -189,18 +188,18 @@ class EmailWebhookService {
         console.log('   - Mail.Read (Application permission)');
         console.log('   - User.Read.All (Application permission)');
         console.log('==========================================\n');
-        
+
         logger.info('🚀 Server started successfully', { port, environment: config.nodeEnv });
     }
 
     setupGracefulShutdown() {
         const gracefulShutdown = async (signal) => {
             logger.info(`📶 Received ${signal}, starting graceful shutdown...`);
-            
+
             if (this.server) {
                 this.server.close(async () => {
                     logger.info('🔌 HTTP server closed');
-                    
+
                     // Close database connection
                     try {
                         await database.disconnect();
@@ -208,11 +207,11 @@ class EmailWebhookService {
                     } catch (error) {
                         logger.error('❌ Error closing database connection', error);
                     }
-                    
+
                     logger.info('✅ Graceful shutdown completed');
                     process.exit(0);
                 });
-                
+
                 // Force close after 30 seconds
                 setTimeout(() => {
                     logger.error('❌ Could not close connections in time, forcefully shutting down');
@@ -220,16 +219,16 @@ class EmailWebhookService {
                 }, 30000);
             }
         };
-        
+
         process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
         process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-        
+
         // Handle uncaught exceptions
         process.on('uncaughtException', (error) => {
             logger.error('❌ Uncaught Exception', error);
             gracefulShutdown('UNCAUGHT_EXCEPTION');
         });
-        
+
         process.on('unhandledRejection', (reason, promise) => {
             logger.error('❌ Unhandled Rejection', { reason, promise });
             gracefulShutdown('UNHANDLED_REJECTION');

@@ -1,30 +1,53 @@
 const { Subscription, MonitoredEmail } = require('../models');
 const { SubscriptionService } = require('../services');
 const { validateEmail } = require('../utils/helpers');
+const config = require('../config');
 
 class SubscriptionController {
     // יצירת subscription למייל ספציפי
     async createSubscription(req, res) {
         try {
             const email = decodeURIComponent(req.params.email);
-            const { 
-                createdBy, 
-                notificationUrl, 
-                changeType = 'created', 
-                expirationHours = 70 
+            const {
+                createdBy,
+                notificationUrl,
+                changeType = 'created',
+                expirationHours = 70
             } = req.body;
-            
+
+            // Validate required parameters
             if (!createdBy) {
-                return res.status(400).json({ 
+                return res.status(400).json({
                     error: 'חסר פרמטר חובה: createdBy'
+                });
+            }
+
+            // Use default notificationUrl from config if not provided or empty
+            const finalNotificationUrl = notificationUrl && notificationUrl.trim() !== '' 
+                ? notificationUrl 
+                : config.webhook?.url;
+            
+            // Add validation for notificationUrl
+            if (!finalNotificationUrl) {
+                return res.status(400).json({
+                    error: 'חסר פרמטר חובה: notificationUrl - יש להגדיר WEBHOOK_URL במשתני הסביבה או לשלוח URL בבקשה'
+                });
+            }
+
+            // Validate notificationUrl format (basic URL validation)
+            try {
+                new URL(finalNotificationUrl);
+            } catch (urlError) {
+                return res.status(400).json({
+                    error: 'notificationUrl חייב להיות URL תקין'
                 });
             }
 
             // בדוק שהמייל קיים במעקב
             const monitoredEmail = await MonitoredEmail.findByEmail(email);
             if (!monitoredEmail) {
-                return res.status(404).json({ 
-                    error: `המייל ${email} לא נמצא ברשימת המעקב` 
+                return res.status(404).json({
+                    error: `המייל ${email} לא נמצא ברשימת המעקב`
                 });
             }
 
@@ -33,17 +56,18 @@ class SubscriptionController {
             }
 
             console.log(`🔄 יוצר subscription נוסף עבור ${email} על ידי ${createdBy}`);
-            
+            console.log(`📍 Notification URL: ${finalNotificationUrl}`);
+
             const result = await SubscriptionService.createSubscription({
                 email,
                 createdBy,
-                notificationUrl,
+                notificationUrl: finalNotificationUrl,
                 changeType,
                 expirationHours
             });
-            
+
             console.log(`✅ Subscription נוסף נוצר עבור ${email}: ${result.subscription.subscriptionId}`);
-            
+
             res.status(201).json({
                 message: 'Subscription נוסף נוצר בהצלחה',
                 subscription: {
@@ -54,26 +78,32 @@ class SubscriptionController {
                     createdAt: result.subscription.createdAt,
                     expirationDateTime: result.subscription.expirationDateTime,
                     createdBy: result.subscription.createdBy,
-                    clientState: result.subscription.clientState
+                    clientState: result.subscription.clientState,
+                    notificationUrl: result.subscription.notificationUrl
                 },
                 microsoftResponse: result.microsoftResponse
             });
 
         } catch (error) {
             console.error(`❌ שגיאה ביצירת subscription עבור ${req.params.email}:`, error);
-            
+
             if (error.message.includes('הרשאה')) {
-                res.status(401).json({ 
-                    error: 'שגיאת הרשאה - נדרשות הרשאות Application ב-Azure AD',
-                    details: 'יש לוודא שהרשאות Mail.Read מוגדרות ל-Service Principal'
+                res.status(401).json({
+                    error: 'אין הרשאות לגישה למייל זה',
+                    details: error.message
                 });
-            } else if (error.message.includes('אין הרשאות')) {
-                res.status(403).json({ 
+            } else if (error.message.includes('NotificationUrl')) {
+                res.status(400).json({
+                    error: 'שגיאה ב-NotificationUrl',
+                    details: error.message
+                });
+            } else if (error.message.includes('403')) {
+                res.status(403).json({
                     error: 'אין הרשאות לגישה למייל זה',
                     details: error.message
                 });
             } else {
-                res.status(500).json({ 
+                res.status(500).json({
                     error: 'שגיאה ביצירת subscription',
                     details: error.message
                 });
@@ -256,17 +286,17 @@ class SubscriptionController {
     async getEmailSubscriptionStatus(req, res) {
         try {
             const email = decodeURIComponent(req.params.email);
-            
+
             const monitoredEmail = await MonitoredEmail.findByEmail(email);
             if (!monitoredEmail) {
-                return res.status(404).json({ 
-                    error: `המייל ${email} לא נמצא ברשימת המעקב` 
+                return res.status(404).json({
+                    error: `המייל ${email} לא נמצא ברשימת המעקב`
                 });
             }
 
             const subscriptions = await Subscription.findAllByEmail(email);
             const stats = await Subscription.getEmailSubscriptionStats(email);
-            
+
             res.json({
                 email: email,
                 monitored: true,
@@ -287,53 +317,117 @@ class SubscriptionController {
 
         } catch (error) {
             console.error(`❌ שגיאה בקבלת סטטוס subscription עבור ${req.params.email}:`, error);
-            res.status(500).json({ 
+            res.status(500).json({
                 error: 'שגיאה בקבלת סטטוס subscription',
-                details: error.message 
+                details: error.message
             });
         }
     }
 
-    // יצירת subscriptions למיילים הממתינים
-    async createSubscriptionsForWaiting(req, res) {
+    // יצירת subscription למייל ספציפי
+    async createSubscription(req, res) {
         try {
-            const waitingEmails = await MonitoredEmail.getEmailsByStatus('WAITING_FOR_AZURE_SETUP');
-            const results = [];
+            const email = decodeURIComponent(req.params.email);
+            const {
+                createdBy,
+                notificationUrl,
+                changeType = 'created',
+                expirationHours = 70
+            } = req.body;
 
-            for (const emailDoc of waitingEmails) {
-                try {
-                    const result = await SubscriptionService.createSubscription({
-                        email: emailDoc.email,
-                        createdBy: req.body.createdBy || 'SYSTEM'
-                    });
-                    
-                    results.push({
-                        email: emailDoc.email,
-                        status: 'success',
-                        subscriptionId: result.subscription.subscriptionId,
-                        message: 'Subscription נוצר בהצלחה'
-                    });
-                } catch (error) {
-                    results.push({
-                        email: emailDoc.email,
-                        status: 'failed',
-                        error: error.message
-                    });
-                }
+            // Validate required parameters
+            if (!createdBy) {
+                return res.status(400).json({
+                    error: 'חסר פרמטר חובה: createdBy'
+                });
             }
 
-            res.json({
-                message: 'יצירת subscriptions הושלמה',
-                processed: waitingEmails.length,
-                results
+            // Use default notificationUrl from config if not provided or empty
+            const finalNotificationUrl = notificationUrl && notificationUrl.trim() !== '' 
+                ? notificationUrl 
+                : config.webhook?.url;
+            
+            // Add validation for notificationUrl
+            if (!finalNotificationUrl) {
+                return res.status(400).json({
+                    error: 'חסר פרמטר חובה: notificationUrl - יש להגדיר WEBHOOK_URL במשתני הסביבה או לשלוח URL בבקשה'
+                });
+            }
+
+            // Validate notificationUrl format (basic URL validation)
+            try {
+                new URL(finalNotificationUrl);
+            } catch (urlError) {
+                return res.status(400).json({
+                    error: 'notificationUrl חייב להיות URL תקין'
+                });
+            }
+
+            // בדוק שהמייל קיים במעקב
+            const monitoredEmail = await MonitoredEmail.findByEmail(email);
+            if (!monitoredEmail) {
+                return res.status(404).json({
+                    error: `המייל ${email} לא נמצא ברשימת המעקב`
+                });
+            }
+
+            if (!validateEmail(email)) {
+                return res.status(400).json({ error: 'כתובת מייל לא תקינה' });
+            }
+
+            console.log(`🔄 יוצר subscription נוסף עבור ${email} על ידי ${createdBy}`);
+            console.log(`📍 Notification URL: ${finalNotificationUrl}`);
+
+            const result = await SubscriptionService.createSubscription({
+                email,
+                createdBy,
+                notificationUrl: finalNotificationUrl,
+                changeType,
+                expirationHours
+            });
+
+            console.log(`✅ Subscription נוסף נוצר עבור ${email}: ${result.subscription.subscriptionId}`);
+
+            res.status(201).json({
+                message: 'Subscription נוסף נוצר בהצלחה',
+                subscription: {
+                    id: result.subscription.subscriptionId,
+                    email: result.subscription.email,
+                    resource: result.subscription.resource,
+                    changeType: result.subscription.changeType,
+                    createdAt: result.subscription.createdAt,
+                    expirationDateTime: result.subscription.expirationDateTime,
+                    createdBy: result.subscription.createdBy,
+                    clientState: result.subscription.clientState,
+                    notificationUrl: result.subscription.notificationUrl
+                },
+                microsoftResponse: result.microsoftResponse
             });
 
         } catch (error) {
-            console.error('❌ שגיאה ביצירת subscriptions:', error);
-            res.status(500).json({
-                error: 'שגיאה ביצירת subscriptions',
-                details: error.message
-            });
+            console.error(`❌ שגיאה ביצירת subscription עבור ${req.params.email}:`, error);
+
+            if (error.message.includes('הרשאה')) {
+                res.status(401).json({
+                    error: 'אין הרשאות לגישה למייל זה',
+                    details: error.message
+                });
+            } else if (error.message.includes('NotificationUrl')) {
+                res.status(400).json({
+                    error: 'שגיאה ב-NotificationUrl',
+                    details: error.message
+                });
+            } else if (error.message.includes('403')) {
+                res.status(403).json({
+                    error: 'אין הרשאות לגישה למייל זה',
+                    details: error.message
+                });
+            } else {
+                res.status(500).json({
+                    error: 'שגיאה ביצירת subscription',
+                    details: error.message
+                });
+            }
         }
     }
 
@@ -349,6 +443,83 @@ class SubscriptionController {
             console.error('❌ שגיאה בקבלת סטטיסטיקות subscription:', error);
             res.status(500).json({
                 error: 'שגיאה בקבלת סטטיסטיקות subscription',
+                details: error.message
+            });
+        }
+    }
+
+    // יצירת subscriptions למיילים הממתינים
+    async createSubscriptionsForWaiting(req, res) {
+        try {
+            const { createdBy, notificationUrl, changeType = 'created', expirationHours = 70 } = req.body;
+
+            if (!createdBy) {
+                return res.status(400).json({
+                    error: 'חסר פרמטר חובה: createdBy'
+                });
+            }
+
+            if (!notificationUrl) {
+                return res.status(400).json({
+                    error: 'חסר פרמטר חובה: notificationUrl'
+                });
+            }
+
+            // Get all monitored emails that are waiting for subscriptions
+            const waitingEmails = await MonitoredEmail.findWaiting();
+
+            if (waitingEmails.length === 0) {
+                return res.json({
+                    message: 'אין מיילים הממתינים ליצירת subscriptions',
+                    created: 0,
+                    results: []
+                });
+            }
+
+            const results = [];
+            let successCount = 0;
+
+            for (const email of waitingEmails) {
+                try {
+                    const result = await SubscriptionService.createSubscription({
+                        email: email.email,
+                        createdBy,
+                        notificationUrl,
+                        changeType,
+                        expirationHours
+                    });
+
+                    results.push({
+                        email: email.email,
+                        status: 'success',
+                        subscriptionId: result.subscription.subscriptionId
+                    });
+                    successCount++;
+
+                    console.log(`✅ Subscription נוצר עבור מייל ממתין: ${email.email}`);
+
+                } catch (error) {
+                    console.error(`❌ שגיאה ביצירת subscription עבור ${email.email}:`, error);
+                    results.push({
+                        email: email.email,
+                        status: 'error',
+                        error: error.message
+                    });
+                }
+            }
+
+            res.json({
+                message: `נוצרו ${successCount} subscriptions מתוך ${waitingEmails.length} מיילים ממתינים`,
+                total: waitingEmails.length,
+                created: successCount,
+                failed: waitingEmails.length - successCount,
+                results
+            });
+
+        } catch (error) {
+            console.error('❌ שגיאה ביצירת subscriptions למיילים ממתינים:', error);
+            res.status(500).json({
+                error: 'שגיאה ביצירת subscriptions למיילים ממתינים',
                 details: error.message
             });
         }

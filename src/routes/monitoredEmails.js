@@ -1,5 +1,6 @@
 const express = require('express');
 const { MonitoredEmailController } = require('../controllers');
+const { SubscriptionController } = require('../controllers');
 const { validation } = require('../middleware');
 
 const router = express.Router();
@@ -32,6 +33,12 @@ router.patch('/:email/status',
 router.delete('/:email', 
     validation.validateEmailParam,
     MonitoredEmailController.removeEmail
+);
+
+// Add subscription creation route for monitored emails
+router.post('/:email/subscription', 
+    validation.validateEmailParam,
+    SubscriptionController.createSubscription
 );
 
 module.exports = router;
