@@ -114,6 +114,14 @@ class EmailWebhookService {
         this.app.post('/monitored-emails/:email/subscription', SubscriptionController.createSubscription);
         this.app.post('/create-subscriptions', SubscriptionController.createSubscriptionsForWaiting);
         this.app.get('/subscriptions', SubscriptionController.getActiveSubscriptions);
+        this.app.delete('/subscriptions/:subscriptionId', SubscriptionController.deleteSubscription);
+        this.app.patch('/subscriptions/:subscriptionId/renew', SubscriptionController.renewSubscription);
+        this.app.get('/subscriptions/expiring', SubscriptionController.getExpiringSoon);
+        this.app.post('/subscriptions/renew-expiring', SubscriptionController.renewExpiringSoon);
+        this.app.post('/subscriptions/validate-all', SubscriptionController.validateAllSubscriptions);
+        this.app.get('/subscriptions/:subscriptionId', SubscriptionController.getSubscriptionInfo);
+        this.app.post('/subscriptions/cleanup', SubscriptionController.cleanupInactiveSubscriptions);
+
 
         // Legacy webhook routes
         this.app.post('/webhooks/microsoft-graph', WebhookController.handleWebhook);

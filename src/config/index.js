@@ -19,8 +19,10 @@ const config = {
     webhook: {
         url: process.env.WEBHOOK_URL,
         siteUrl: process.env.WEBHOOK_SITE_URL,
-        maxExpirationHours: 4230, // Maximum webhook expiration time in minutes
-        defaultExpirationHours: 70
+        maxExpirationMinutes: 4230, // Maximum webhook expiration time in minutes (Microsoft Graph limit)
+        defaultExpirationHours: 72, // 72 hours as requested
+        renewalThresholdHours: 24, // Renew subscriptions 24 hours before expiry
+        cleanupIntervalHours: 6 // Run cleanup every 6 hours
     },
     
     // MongoDB Configuration

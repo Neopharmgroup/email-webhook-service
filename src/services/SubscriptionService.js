@@ -90,8 +90,20 @@ class SubscriptionService {
             await Subscription.updateExpiration(subscriptionId, response.data.expirationDateTime, renewedBy);
 
             console.log(`✅ Subscription חודש: ${subscriptionId}`);
-            return response.data;
+            return { success: true, data: response.data };
         } catch (error) {
+            if (error.response?.status === 404) {
+                // Subscription doesn't exist in Microsoft, deactivate in DB
+                await Subscription.deactivate(subscriptionId, renewedBy);
+                console.log(`⚠️ Subscription ${subscriptionId} לא נמצא ב-Microsoft, בוטל במסד הנתונים`);
+                // RETURN SUCCESS WITH SPECIAL FLAG INSTEAD OF THROWING
+                return {
+                    success: true,
+                    cleaned: true,
+                    message: `Subscription ${subscriptionId} לא נמצא ב-Microsoft Graph ובוטל מהמסד נתונים`
+                };
+            }
+
             console.error(`❌ שגיאה בחידוש subscription ${subscriptionId}:`, error.response?.data || error.message);
             throw this._handleSubscriptionError(error);
         }
@@ -124,7 +136,7 @@ class SubscriptionService {
                 console.log(`⚠️ Subscription ${subscriptionId} לא נמצא ב-Microsoft, בוטל במסד הנתונים`);
                 return true;
             }
-            
+
             console.error(`❌ שגיאה במחיקת subscription ${subscriptionId}:`, error.response?.data || error.message);
             throw this._handleSubscriptionError(error);
         }
@@ -241,7 +253,7 @@ class SubscriptionService {
                     return new Error(`שגיאה ב-Microsoft Graph API: ${data?.error?.message || error.message}`);
             }
         }
-        
+
         return error;
     }
 }

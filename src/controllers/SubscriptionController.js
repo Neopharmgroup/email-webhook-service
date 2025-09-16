@@ -12,10 +12,9 @@ class SubscriptionController {
                 createdBy,
                 notificationUrl,
                 changeType = 'created',
-                expirationHours = 70
+                expirationHours = 72  // שינוי ל-72 שעות כפי שביקשת
             } = req.body;
 
-            // Validate required parameters
             if (!createdBy) {
                 return res.status(400).json({
                     error: 'חסר פרמטר חובה: createdBy'
@@ -56,7 +55,6 @@ class SubscriptionController {
             }
 
             console.log(`🔄 יוצר subscription נוסף עבור ${email} על ידי ${createdBy}`);
-            console.log(`📍 Notification URL: ${finalNotificationUrl}`);
 
             const result = await SubscriptionService.createSubscription({
                 email,
@@ -89,15 +87,10 @@ class SubscriptionController {
 
             if (error.message.includes('הרשאה')) {
                 res.status(401).json({
-                    error: 'אין הרשאות לגישה למייל זה',
-                    details: error.message
+                    error: 'שגיאת הרשאה - נדרשות הרשאות Application ב-Azure AD',
+                    details: 'יש לוודא שהרשאות Mail.Read מוגדרות ל-Service Principal'
                 });
-            } else if (error.message.includes('NotificationUrl')) {
-                res.status(400).json({
-                    error: 'שגיאה ב-NotificationUrl',
-                    details: error.message
-                });
-            } else if (error.message.includes('403')) {
+            } else if (error.message.includes('אין הרשאות')) {
                 res.status(403).json({
                     error: 'אין הרשאות לגישה למייל זה',
                     details: error.message
@@ -115,7 +108,7 @@ class SubscriptionController {
     async renewSubscription(req, res) {
         try {
             const { subscriptionId } = req.params;
-            const { renewedBy, expirationHours = 70 } = req.body;
+            const { renewedBy, expirationHours = 72 } = req.body;
 
             if (!renewedBy) {
                 return res.status(400).json({
@@ -125,10 +118,23 @@ class SubscriptionController {
 
             const result = await SubscriptionService.renewSubscription(subscriptionId, renewedBy, expirationHours);
 
+            // CHECK IF SUBSCRIPTION WAS CLEANED UP
+            if (result.cleaned) {
+                return res.status(200).json({
+                    message: 'Subscription לא נמצא ב-Microsoft Graph ובוטל מהמסד נתונים',
+                    subscriptionId: subscriptionId,
+                    action: 'cleaned_up',
+                    details: result.message,
+                    cleanedBy: renewedBy,
+                    cleanedAt: new Date().toISOString()
+                });
+            }
+
+            // NORMAL RENEWAL SUCCESS
             res.json({
                 message: 'Subscription חודש בהצלחה',
                 subscriptionId: subscriptionId,
-                newExpirationDateTime: result.expirationDateTime,
+                newExpirationDateTime: result.data.expirationDateTime,
                 renewedBy: renewedBy,
                 renewedAt: new Date().toISOString()
             });
@@ -137,6 +143,23 @@ class SubscriptionController {
             console.error(`❌ שגיאה בחידוש subscription ${req.params.subscriptionId}:`, error);
             res.status(500).json({
                 error: 'שגיאה בחידוש subscription',
+                details: error.message
+            });
+        }
+    }
+    async cleanupInactiveSubscriptions(req, res) {
+        try {
+            const results = await SubscriptionService.validateAllSubscriptions();
+
+            res.json({
+                message: 'ניקוי subscriptions הושלם',
+                cleaned: results.filter(r => r.status === 'not_found').length,
+                results: results
+            });
+        } catch (error) {
+            console.error('❌ שגיאה בניקוי subscriptions:', error);
+            res.status(500).json({
+                error: 'שגיאה בניקוי subscriptions',
                 details: error.message
             });
         }
@@ -327,81 +350,35 @@ class SubscriptionController {
     // יצירת subscription למייל ספציפי
     async createSubscription(req, res) {
         try {
-            const email = decodeURIComponent(req.params.email);
-            const {
-                createdBy,
-                notificationUrl,
-                changeType = 'created',
-                expirationHours = 70
-            } = req.body;
+            const waitingEmails = await MonitoredEmail.getEmailsByStatus('WAITING_FOR_AZURE_SETUP');
+            const results = [];
 
-            // Validate required parameters
-            if (!createdBy) {
-                return res.status(400).json({
-                    error: 'חסר פרמטר חובה: createdBy'
-                });
+            for (const emailDoc of waitingEmails) {
+                try {
+                    const result = await SubscriptionService.createSubscription({
+                        email: emailDoc.email,
+                        createdBy: req.body.createdBy || 'SYSTEM'
+                    });
+
+                    results.push({
+                        email: emailDoc.email,
+                        status: 'success',
+                        subscriptionId: result.subscription.subscriptionId,
+                        message: 'Subscription נוצר בהצלחה'
+                    });
+                } catch (error) {
+                    results.push({
+                        email: emailDoc.email,
+                        status: 'failed',
+                        error: error.message
+                    });
+                }
             }
 
-            // Use default notificationUrl from config if not provided or empty
-            const finalNotificationUrl = notificationUrl && notificationUrl.trim() !== '' 
-                ? notificationUrl 
-                : config.webhook?.url;
-            
-            // Add validation for notificationUrl
-            if (!finalNotificationUrl) {
-                return res.status(400).json({
-                    error: 'חסר פרמטר חובה: notificationUrl - יש להגדיר WEBHOOK_URL במשתני הסביבה או לשלוח URL בבקשה'
-                });
-            }
-
-            // Validate notificationUrl format (basic URL validation)
-            try {
-                new URL(finalNotificationUrl);
-            } catch (urlError) {
-                return res.status(400).json({
-                    error: 'notificationUrl חייב להיות URL תקין'
-                });
-            }
-
-            // בדוק שהמייל קיים במעקב
-            const monitoredEmail = await MonitoredEmail.findByEmail(email);
-            if (!monitoredEmail) {
-                return res.status(404).json({
-                    error: `המייל ${email} לא נמצא ברשימת המעקב`
-                });
-            }
-
-            if (!validateEmail(email)) {
-                return res.status(400).json({ error: 'כתובת מייל לא תקינה' });
-            }
-
-            console.log(`🔄 יוצר subscription נוסף עבור ${email} על ידי ${createdBy}`);
-            console.log(`📍 Notification URL: ${finalNotificationUrl}`);
-
-            const result = await SubscriptionService.createSubscription({
-                email,
-                createdBy,
-                notificationUrl: finalNotificationUrl,
-                changeType,
-                expirationHours
-            });
-
-            console.log(`✅ Subscription נוסף נוצר עבור ${email}: ${result.subscription.subscriptionId}`);
-
-            res.status(201).json({
-                message: 'Subscription נוסף נוצר בהצלחה',
-                subscription: {
-                    id: result.subscription.subscriptionId,
-                    email: result.subscription.email,
-                    resource: result.subscription.resource,
-                    changeType: result.subscription.changeType,
-                    createdAt: result.subscription.createdAt,
-                    expirationDateTime: result.subscription.expirationDateTime,
-                    createdBy: result.subscription.createdBy,
-                    clientState: result.subscription.clientState,
-                    notificationUrl: result.subscription.notificationUrl
-                },
-                microsoftResponse: result.microsoftResponse
+            res.json({
+                message: 'יצירת subscriptions הושלמה',
+                processed: waitingEmails.length,
+                results
             });
 
         } catch (error) {
