@@ -11,7 +11,7 @@ class WebhookService {
         this.automationServiceUrl = process.env.AUTOMATION_SERVICE_URL || 'http://localhost:4005/api/import-automation/direct-email-webhook';
 
         // הגדרות Azure Storage
-        this.azureConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING || 'DefaultEndpointsProtocol=https;AccountName=neodocuments;AccountKey=y9RdKNKH0cpEYz0/rEU2xdA0ajosPM9bAiCt1xkF7NhrC9QAtA3cw90tXICZxlkNo+VgkA91tpGB+ASt+r8vRA==;EndpointSuffix=core.windows.net';
+        this.azureConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING ;
         this.containerName = process.env.CONTAINER_NAME || 'import-file-automation';
 
         // יצירת Azure Blob Service Client

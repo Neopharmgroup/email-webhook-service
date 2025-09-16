@@ -1,7 +1,7 @@
 const { BlobServiceClient, BlobSASPermissions } = require('@azure/storage-blob');
 
 const blobServiceClient = BlobServiceClient.fromConnectionString(
-    'DefaultEndpointsProtocol=https;AccountName=neodocuments;AccountKey=y9RdKNKH0cpEYz0/rEU2xdA0ajosPM9bAiCt1xkF7NhrC9QAtA3cw90tXICZxlkNo+VgkA91tpGB+ASt+r8vRA==;EndpointSuffix=core.windows.net'
+    process.env.AZURE_STORAGE_CONNECTION_STRING 
 );
 
 const uploadBase64File = async (containerName, base64String, blobName, contentType = null) => {
