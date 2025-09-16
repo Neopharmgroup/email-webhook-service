@@ -1,4 +1,27 @@
 const database = require('../database/connection');
+const mongoose = require('mongoose');
+
+const emailNotificationSchema = new mongoose.Schema({
+    email: { type: String, required: true },
+    subscriptionId: { type: String, required: true },
+    resource: { type: String, required: true },
+    changeType: { type: String, required: true },
+    clientState: { type: String },
+    messageId: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    processed: { type: Boolean, default: false },
+    
+    // שדות חדשים למעקב אחר מיילים שדולגו
+    skipped: { type: Boolean, default: false },
+    reason: { type: String },
+    
+    metadata: {
+        userAgent: String,
+        ipAddress: String
+    }
+}, {
+    timestamps: true
+});
 
 class EmailNotification {
     static get collection() {

@@ -20,6 +20,15 @@ router.get('/statistics',
     MonitoredEmailController.getStatistics
 );
 
+// Routes for automation emails
+router.post('/automation', 
+    MonitoredEmailController.addForAutomation
+);
+
+router.get('/automation/list', 
+    MonitoredEmailController.getAutomationEmails
+);
+
 router.get('/:email', 
     validation.validateEmailParam,
     MonitoredEmailController.getEmailDetails
