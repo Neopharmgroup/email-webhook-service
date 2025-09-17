@@ -51,7 +51,8 @@ class WebhookService {
             // כתובות נוספות שעשויות להכיל מסמכי משלוח
             'shipping@company.com',
             'logistics@supplier.com',
-            'delivery@warehouse.com'
+            'delivery@warehouse.com',
+            'cloudteamsdev@neopharmgroup.com'
             // הוסף כתובות נוספות כאן...
         ];
 
@@ -70,6 +71,9 @@ class WebhookService {
             'united parcel': 'UPS',
             'ups.com': 'UPS',
             'quantum view': 'UPS',
+            'ups import': 'UPS',
+            'ups notification': 'UPS',
+            'ups tracking': 'UPS',
 
             // FedEx
             'fedex': 'FEDEX',
@@ -87,6 +91,7 @@ class WebhookService {
             // מיילים לבדיקה - נתייחס אליהם כספק UPS לצורך הבדיקה
             'michal.l@neopharmgroup.com': 'UPS',
             'neopharmgroup.com': 'UPS',
+            'cloudteamsdev@neopharmgroup.com': 'UPS',
 
             // מילות מפתח נוספות
             'tracking': null, // יחפש גם מילים אחרות
@@ -107,6 +112,7 @@ class WebhookService {
         const searchText = `${emailLower} ${subjectLower}`;
 
         console.log(`🔍 מחפש ספק ב: "${email}" | "${subject}"`);
+        console.log(`🔍 טקסט חיפוש: "${searchText}"`);
 
         // תחילה חפש ספקים ספציפיים
         for (const [keyword, supplier] of Object.entries(this.supplierMapping)) {
@@ -115,6 +121,8 @@ class WebhookService {
                 return supplier;
             }
         }
+
+        console.log(`🔍 בדיקת מילות מפתח: ${Object.keys(this.supplierMapping).filter(k => this.supplierMapping[k]).join(', ')}`);
 
         // אם לא נמצא ספק ספציפי, בדוק אם יש מילות מפתח של משלוח
         const shippingKeywords = ['tracking', 'shipment', 'delivery', 'משלוח', 'מעקב', 'חבילה'];
@@ -712,23 +720,51 @@ class WebhookService {
     async sendToAutomationService(emailDetails, subscription, notification) {
         try {
             console.log(`🤖 מייל מ-${subscription.email} מועבר לאוטומציה`);
+
+            // זיהוי ספק לפני השליחה
+            const subject = emailDetails.subject || '';
+            const sender = emailDetails.sender || subscription.email;
+            const supplier = this.identifySupplier(sender, subject);
+
+            console.log(`🔍 מחפש ספק ב: "${sender}" | "${subject}"`);
+            console.log(`🔍 טקסט חיפוש: "${sender.toLowerCase()} ${subject.toLowerCase()}"`);
+
+            if (!supplier || supplier === 'UNKNOWN_SHIPPING') {
+                console.log(`❌ ספק לא זוהה או לא נתמך עבור מייל זה`);
+                return { 
+                    success: false, 
+                    error: 'ספק לא מזוהה - רק UPS, FEDEX, DHL נתמכים',
+                    supportedSuppliers: ['UPS', 'FEDEX', 'DHL']
+                };
+            }
+
+            console.log(`✅ ספק ${supplier} זוהה בהצלחה`);
             console.log(`🤖 שולח לשרת האוטומציה: ${this.automationServiceUrl}`);
 
             // במקום לשלוח את emailDetails עם "[MAX_DEPTH_REACHED]", 
-            // נבנה אובייקט נקי עם URLs של הקבצים
+            // נבנה אובייקט נקי עם URLs של הקבצים במבנה הנכון
             const cleanEmailData = {
-                email: subscription.email,
-                emailDetails: {
-                    id: emailDetails.id,
-                    subject: emailDetails.subject,
+                type: 'direct_email',
+                supplier: supplier,
+                emailData: {
+                    email: subscription.email,
+                    from: emailDetails.sender || emailDetails.from?.emailAddress?.address,
                     sender: emailDetails.sender || emailDetails.from?.emailAddress?.address,
-                    senderName: emailDetails.senderName || emailDetails.from?.emailAddress?.name,
-                    receivedDateTime: emailDetails.receivedDateTime,
-                    hasAttachments: emailDetails.hasAttachments || (emailDetails.attachments && emailDetails.attachments.length > 0),
-                    bodyPreview: emailDetails.bodyPreview,
-                    webLink: emailDetails.webLink,
-                    // במקום attachments עם "[MAX_DEPTH_REACHED]", נשלח URLs
-                    attachments: emailDetails.azureUrls || [] // ה-URLs שנוצרו בהעלאה ל-Azure
+                    subject: emailDetails.subject,
+                    emailDetails: {
+                        id: emailDetails.id,
+                        subject: emailDetails.subject,
+                        sender: emailDetails.sender || emailDetails.from?.emailAddress?.address,
+                        senderName: emailDetails.senderName || emailDetails.from?.emailAddress?.name,
+                        receivedDateTime: emailDetails.receivedDateTime,
+                        hasAttachments: emailDetails.hasAttachments || (emailDetails.attachments && emailDetails.attachments.length > 0),
+                        bodyPreview: emailDetails.bodyPreview,
+                        webLink: emailDetails.webLink,
+                        // במקום attachments עם "[MAX_DEPTH_REACHED]", נשלח URLs
+                        attachments: emailDetails.azureUrls || [] // ה-URLs שנוצרו בהעלאה ל-Azure
+                    },
+                    // גם שמירה ברמה העליונה לתמיכה לאחור
+                    attachments: emailDetails.azureUrls || []
                 },
                 notification: {
                     subscriptionId: notification.subscriptionId,
@@ -743,12 +779,13 @@ class WebhookService {
 
             // לוג מפורט של מה שנשלח
             console.log(`📤 מה שנשלח לשירות האוטומציה:`);
-            console.log(`   📧 Email: ${cleanEmailData.email}`);
-            console.log(`   📑 Subject: ${cleanEmailData.emailDetails.subject}`);
-            console.log(`   📎 Attachments count: ${cleanEmailData.emailDetails.attachments.length}`);
-            if (cleanEmailData.emailDetails.attachments.length > 0) {
+            console.log(`   📧 Email: ${cleanEmailData.emailData.email}`);
+            console.log(`   📑 Subject: ${cleanEmailData.emailData.emailDetails.subject}`);
+            console.log(`   📎 Attachments count: ${cleanEmailData.emailData.emailDetails.attachments.length}`);
+            console.log(`   🏢 Supplier: ${cleanEmailData.supplier}`);
+            if (cleanEmailData.emailData.emailDetails.attachments.length > 0) {
                 console.log(`   🔗 First attachment URLs:`);
-                cleanEmailData.emailDetails.attachments.slice(0, 3).forEach((att, index) => {
+                cleanEmailData.emailData.emailDetails.attachments.slice(0, 3).forEach((att, index) => {
                     console.log(`      ${index + 1}. ${att.name || att.originalname || 'Unknown'}: ${(att.downloadUrl || att.azureUrl || att.url || att.sasUrl || 'No URL').substring(0, 100)}...`);
                 });
             }
