@@ -4,7 +4,7 @@
   "description": "Microsoft Graph Email Monitoring Microservice with Clean Architecture",
   "main": "src/app.js",
   "scripts": {
-    "start": "node src/app.js",
+    "start": "node --watch src/app.js",
     "dev": "nodemon src/app.js",
     "dev:watch": "nodemon --watch src --ext js,json,env src/app.js",
     "dev:debug": "nodemon --inspect src/app.js",
@@ -35,11 +35,13 @@
     "npm": ">=8.0.0"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.28.0",
     "axios": "^1.7.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
     "express": "^4.19.0",
     "mongodb": "^6.0.0",
+    "mongoose": "^8.18.1",
     "winston": "^3.10.0"
   },
   "devDependencies": {

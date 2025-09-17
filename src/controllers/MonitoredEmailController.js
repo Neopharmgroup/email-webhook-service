@@ -274,6 +274,118 @@ class MonitoredEmailController {
             });
         }
     }
+
+    // הוספת מייל לאוטומציה (פונקציה מהירה)
+    async addForAutomation(req, res) {
+        try {
+            const { email, addedBy, department, displayName } = req.body;
+            
+            if (!email || !addedBy) {
+                return res.status(400).json({ 
+                    error: 'חסרים פרמטרים חובה',
+                    required: ['email', 'addedBy']
+                });
+            }
+
+            if (!validateEmail(email)) {
+                return res.status(400).json({ error: 'כתובת מייל לא תקינה' });
+            }
+
+            // בדוק אם המייל כבר קיים
+            const existingEmail = await MonitoredEmail.findByEmail(email);
+            if (existingEmail) {
+                // אם המייל כבר קיים, עדכן אותו לאוטומציה
+                const updated = await MonitoredEmail.updateStatus(
+                    email, 
+                    'ACTIVE', 
+                    addedBy, 
+                    'עודכן לניטור אוטומציה - עיבוד מסמכים'
+                );
+                
+                if (updated) {
+                    console.log(`📧 מייל ${email} עודכן לאוטומציה על ידי ${addedBy}`);
+                    return res.json({
+                        success: true,
+                        message: `מייל ${email} עודכן לניטור אוטומציה`,
+                        status: 'updated',
+                        email
+                    });
+                }
+            }
+
+            // הוסף מייל חדש לאוטומציה
+            const monitoredEmail = await MonitoredEmail.add({
+                email,
+                displayName: displayName || email.split('@')[0],
+                department: department || 'ספק',
+                monitoringReason: 'import_automation',
+                addedBy,
+                priority: 'HIGH',
+                notes: 'מייל לאוטומציה - עיבוד מסמכים ויבוא אוטומטי',
+                preApproved: true,
+                initialStatus: 'ACTIVE',
+                ipAddress: req.ip || req.connection.remoteAddress,
+                userAgent: req.get('User-Agent')
+            });
+
+            console.log(`🚀 מייל ${email} נוסף לאוטומציה על ידי ${addedBy}`);
+
+            res.status(201).json({
+                success: true,
+                message: `מייל ${email} נוסף לניטור אוטומציה בהצלחה`,
+                status: 'added',
+                monitoredEmail: {
+                    id: monitoredEmail._id,
+                    email: monitoredEmail.email,
+                    status: monitoredEmail.status,
+                    monitoringReason: monitoredEmail.monitoringReason,
+                    addedAt: monitoredEmail.addedAt
+                },
+                instruction: 'המייל כעת מנוטר לאוטומציה - מסמכים יעובדו אוטומטית'
+            });
+
+        } catch (error) {
+            console.error('❌ שגיאה בהוספת מייל לאוטומציה:', error);
+            res.status(500).json({
+                success: false,
+                error: 'שגיאה בהוספת מייל לאוטומציה',
+                details: error.message
+            });
+        }
+    }
+
+    // קבלת רשימת מיילים לאוטומציה
+    async getAutomationEmails(req, res) {
+        try {
+            const automationEmails = await MonitoredEmail.getEmailsByStatus('ACTIVE');
+            const filteredEmails = automationEmails.filter(email => 
+                email.monitoringReason === 'import_automation' || 
+                email.monitoringReason === 'document_processing' ||
+                email.monitoringReason === 'automation'
+            );
+
+            res.json({
+                success: true,
+                total: filteredEmails.length,
+                emails: filteredEmails.map(email => ({
+                    email: email.email,
+                    displayName: email.displayName,
+                    department: email.department,
+                    addedBy: email.addedBy,
+                    addedAt: email.addedAt,
+                    status: email.status,
+                    notes: email.notes
+                }))
+            });
+        } catch (error) {
+            console.error('❌ שגיאה בקבלת מיילים לאוטומציה:', error);
+            res.status(500).json({
+                success: false,
+                error: 'שגיאה בקבלת מיילים לאוטומציה',
+                details: error.message
+            });
+        }
+    }
 }
 
 module.exports = new MonitoredEmailController();

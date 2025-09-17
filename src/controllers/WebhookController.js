@@ -119,6 +119,82 @@ class WebhookController {
             });
         }
     }
+
+    // קבלת רשימת מיילים פעילים לאוטומציה - שינוי מ-static לinstance method
+    async getAutomationEmails(req, res) {
+        try {
+            const emails = WebhookService.getAutomationEmails();
+            res.json({
+                success: true,
+                emails: emails,
+                count: emails.length
+            });
+        } catch (error) {
+            console.error('Error getting automation emails:', error);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to get automation emails'
+            });
+        }
+    }
+    
+    // הוספת מייל לרשימת האוטומציה - שינוי מ-static לinstance method
+    async addEmailToAutomation(req, res) {
+        try {
+            const { email } = req.body;
+            
+            if (!email) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Email is required'
+                });
+            }
+            
+            const added = WebhookService.addEmailToAutomation(email);
+            
+            res.json({
+                success: true,
+                message: added ? 'Email added successfully' : 'Email already exists',
+                email: email,
+                emails: WebhookService.getAutomationEmails()
+            });
+        } catch (error) {
+            console.error('Error adding email to automation:', error);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to add email to automation'
+            });
+        }
+    }
+    
+    // הסרת מייל מרשימת האוטומציה - שינוי מ-static לinstance method
+    async removeEmailFromAutomation(req, res) {
+        try {
+            const { email } = req.params;
+            
+            if (!email) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Email is required'
+                });
+            }
+            
+            const removed = WebhookService.removeEmailFromAutomation(email);
+            
+            res.json({
+                success: true,
+                message: removed ? 'Email removed successfully' : 'Email not found',
+                email: email,
+                emails: WebhookService.getAutomationEmails()
+            });
+        } catch (error) {
+            console.error('Error removing email from automation:', error);
+            res.status(500).json({
+                success: false,
+                error: 'Failed to remove email from automation'
+            });
+        }
+    }
 }
 
 module.exports = new WebhookController();
