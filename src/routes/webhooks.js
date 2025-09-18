@@ -12,6 +12,12 @@ router.get('/statistics', WebhookController.getStatistics);
 router.post('/test', WebhookController.testWebhook);
 router.post('/cleanup', WebhookController.cleanupOldNotifications);
 router.post('/reprocess', WebhookController.reprocessUnprocessedNotifications);
+router.post('/process-unprocessed', WebhookController.processUnprocessedNotifications); // Manual processing of unprocessed notifications
+
+// System diagnosis
+router.get('/system-diagnosis', WebhookController.systemDiagnosis);
+router.get('/check-graph-subscriptions', WebhookController.checkGraphSubscriptions);
+router.post('/test-manual', WebhookController.testWebhookManually);
 
 // Automation emails management (from array)
 router.get('/automation-emails', WebhookController.getAutomationEmails);
