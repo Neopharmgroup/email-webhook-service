@@ -8,6 +8,12 @@ class SubscriptionController {
     async createSubscription(req, res) {
         try {
             const email = decodeURIComponent(req.params.email);
+            console.log(`🐛 DEBUG: createSubscription function called!`);
+            console.log(`🐛 DEBUG: req.method = ${req.method}`);
+            console.log(`🐛 DEBUG: req.originalUrl = ${req.originalUrl}`);
+            console.log(`🐛 DEBUG: req.params.email = ${req.params.email}`);
+            console.log(`🐛 DEBUG: decoded email = ${email}`);
+            
             const {
                 createdBy,
                 notificationUrl,
@@ -347,66 +353,7 @@ class SubscriptionController {
         }
     }
 
-    // יצירת subscription למייל ספציפי
-    async createSubscription(req, res) {
-        try {
-            const waitingEmails = await MonitoredEmail.getEmailsByStatus('WAITING_FOR_AZURE_SETUP');
-            const results = [];
 
-            for (const emailDoc of waitingEmails) {
-                try {
-                    const result = await SubscriptionService.createSubscription({
-                        email: emailDoc.email,
-                        createdBy: req.body.createdBy || 'SYSTEM'
-                    });
-
-                    results.push({
-                        email: emailDoc.email,
-                        status: 'success',
-                        subscriptionId: result.subscription.subscriptionId,
-                        message: 'Subscription נוצר בהצלחה'
-                    });
-                } catch (error) {
-                    results.push({
-                        email: emailDoc.email,
-                        status: 'failed',
-                        error: error.message
-                    });
-                }
-            }
-
-            res.json({
-                message: 'יצירת subscriptions הושלמה',
-                processed: waitingEmails.length,
-                results
-            });
-
-        } catch (error) {
-            console.error(`❌ שגיאה ביצירת subscription עבור ${req.params.email}:`, error);
-
-            if (error.message.includes('הרשאה')) {
-                res.status(401).json({
-                    error: 'אין הרשאות לגישה למייל זה',
-                    details: error.message
-                });
-            } else if (error.message.includes('NotificationUrl')) {
-                res.status(400).json({
-                    error: 'שגיאה ב-NotificationUrl',
-                    details: error.message
-                });
-            } else if (error.message.includes('403')) {
-                res.status(403).json({
-                    error: 'אין הרשאות לגישה למייל זה',
-                    details: error.message
-                });
-            } else {
-                res.status(500).json({
-                    error: 'שגיאה ביצירת subscription',
-                    details: error.message
-                });
-            }
-        }
-    }
 
     // סטטיסטיקות subscriptions
     async getStatistics(req, res) {
@@ -428,6 +375,9 @@ class SubscriptionController {
     // יצירת subscriptions למיילים הממתינים
     async createSubscriptionsForWaiting(req, res) {
         try {
+            console.log(`🐛 DEBUG: createSubscriptionsForWaiting function called!`);
+            console.log(`🐛 DEBUG: req.method = ${req.method}`);
+            console.log(`🐛 DEBUG: req.originalUrl = ${req.originalUrl}`);
             const { createdBy, notificationUrl, changeType = 'created', expirationHours = 70 } = req.body;
 
             if (!createdBy) {

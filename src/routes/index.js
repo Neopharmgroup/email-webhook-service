@@ -9,6 +9,10 @@ const emailsRouter = require('./emails');
 const dashboardRouter = require('./dashboard');
 const auditRouter = require('./audit');
 const automationManagementRouter = require('./automationManagement');
+const autoRenewalRouter = require('./autoRenewal');
+const emailConfigurationsRouter = require('./emailConfigurations');
+const monitoringRulesRouter = require('./monitoringRules');
+const importLogsRouter = require('./importLogs');
 
 const router = express.Router();
 
@@ -26,7 +30,11 @@ router.get('/', (req, res) => {
             emails: '/api/emails',
             dashboard: '/api/dashboard',
             audit: '/api/audit',
-            automationManagement: '/api/automation-management'
+            automationManagement: '/api/automation-management',
+            autoRenewal: '/api/auto-renewal',
+            emailConfigurations: '/api/email-configurations',
+            monitoringRules: '/api/monitoring-rules',
+            importLogs: '/api/import-logs'
         },
         features: {
             supplierIdentification: true,
@@ -59,6 +67,10 @@ router.use('/emails', emailsRouter);
 router.use('/dashboard', dashboardRouter);
 router.use('/audit', auditRouter);
 router.use('/automation-management', automationManagementRouter);
+router.use('/auto-renewal', autoRenewalRouter);
+router.use('/email-configurations', emailConfigurationsRouter);
+router.use('/monitoring-rules', monitoringRulesRouter);
+router.use('/import-logs', importLogsRouter);
 
 // 404 handler for API routes
 router.use('*', (req, res) => {

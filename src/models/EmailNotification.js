@@ -14,6 +14,60 @@ const emailNotificationSchema = new mongoose.Schema({
     // שדות חדשים למעקב אחר מיילים שדולגו
     skipped: { type: Boolean, default: false },
     reason: { type: String },
+    hasErrors: { type: Boolean, default: false },
+    
+    // מידע על יעד השליחה
+    targetService: { type: String, enum: ['automation', 'archive', 'custom'], default: 'automation' },
+    customServiceUrl: { type: String },
+    
+    // מידע מועשר על הספק והמסמך
+    supplierInfo: {
+        supplier: String,
+        documentType: String,
+        trackingNumber: String,
+        poNumber: String,
+        weight: Number,
+        weightUnit: String,
+        confidence: Number,
+        supplierName: String
+    },
+    
+    // נתונים שחולצו מהמסמך
+    extractedData: {
+        trackingNumber: String,
+        poNumber: String,
+        weight: Number,
+        weightUnit: String,
+        confidence: Number,
+        supplierName: String,
+        documentType: String,
+        billOfLadingNumber: String,
+        packageCount: Number,
+        value: Number,
+        currency: String
+    },
+    
+    // מידע על המייל
+    emailInfo: {
+        fromEmail: String,
+        subject: String,
+        hasAttachments: Boolean,
+        attachmentCount: Number
+    },
+    
+    // מידע על כללי מוניטורינג
+    monitoringInfo: {
+        matchingRules: [{
+            id: String,
+            name: String,
+            priority: String
+        }],
+        topRule: {
+            id: String,
+            name: String,
+            priority: String
+        }
+    },
     
     metadata: {
         userAgent: String,

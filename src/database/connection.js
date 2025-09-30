@@ -22,7 +22,9 @@ class DatabaseConnection {
                 monitoredEmails: this.db.collection('monitored_emails'),
                 subscriptions: this.db.collection('subscriptions'),
                 notifications: this.db.collection('notifications'),
-                auditLogs: this.db.collection('audit_logs')
+                auditLogs: this.db.collection('audit_logs'),
+                emailConfigurations: this.db.collection('email_configurations'),
+                monitoringRules: this.db.collection('monitoring_rules')
             };
 
             // Create indexes
@@ -59,6 +61,18 @@ class DatabaseConnection {
             await this.collections.auditLogs.createIndex({ performedBy: 1 });
             await this.collections.auditLogs.createIndex({ action: 1 });
             
+            // Email Configurations indexes
+            await this.collections.emailConfigurations.createIndex({ email: 1 }, { unique: true });
+            await this.collections.emailConfigurations.createIndex({ isActive: 1 });
+            await this.collections.emailConfigurations.createIndex({ supplier: 1 });
+            await this.collections.emailConfigurations.createIndex({ addedAt: -1 });
+            
+            // Monitoring Rules indexes
+            await this.collections.monitoringRules.createIndex({ emailAddress: 1 });
+            await this.collections.monitoringRules.createIndex({ active: 1 });
+            await this.collections.monitoringRules.createIndex({ emailAddress: 1, active: 1 });
+            await this.collections.monitoringRules.createIndex({ createdAt: -1 });
+            
             console.log('✅ אינדקסים נוצרו בהצלחה');
         } catch (error) {
             console.error('❌ שגיאה ביצירת אינדקסים:', error);
@@ -66,8 +80,14 @@ class DatabaseConnection {
     }
 
     getCollection(name) {
+        if (!this.db) {
+            throw new Error('Database not connected yet. Call connect() first.');
+        }
+        
         if (!this.collections[name]) {
-            throw new Error(`Collection ${name} not found`);
+            // אם הקולקציה לא מוגדרת מראש, צור אותה דינמית
+            console.log(`⚠️ יוצר קולקציה חדשה: ${name}`);
+            this.collections[name] = this.db.collection(name);
         }
         return this.collections[name];
     }

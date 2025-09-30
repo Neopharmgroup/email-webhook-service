@@ -6,6 +6,10 @@ const NotificationController = require('./NotificationController');
 const EmailController = require('./EmailController');
 const DashboardController = require('./DashboardController');
 const AuditController = require('./AuditController');
+const AutoRenewalController = require('./AutoRenewalController');
+const EmailConfigurationController = require('./EmailConfigurationController');
+const MonitoringRuleController = require('./MonitoringRuleController');
+const ImportLogsController = require('./ImportLogsController');
 
 module.exports = {
     MonitoredEmailController,
@@ -14,5 +18,9 @@ module.exports = {
     NotificationController,
     EmailController,
     DashboardController,
-    AuditController
+    AuditController,
+    AutoRenewalController,
+    EmailConfigurationController,
+    MonitoringRuleController,
+    ImportLogsController
 };

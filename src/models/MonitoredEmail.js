@@ -75,6 +75,13 @@ class MonitoredEmail {
             .toArray();
     }
 
+    static async findWaiting() {
+        return await this.collection
+            .find({ status: 'WAITING_FOR_AZURE_SETUP' })
+            .sort({ addedAt: -1 })
+            .toArray();
+    }
+
     static async updateStatus(email, status, updatedBy, notes = '') {
         const oldEmail = await this.findByEmail(email);
         

@@ -3,12 +3,16 @@ const { BlobServiceClient, BlobSASPermissions } = require('@azure/storage-blob')
 const blobStorageService = require('./blobStorageService');
 const config = require('../config');
 const { EmailNotification, Subscription, MonitoredEmail } = require('../models');
+const MonitoringService = require('./MonitoringService');
 
 class WebhookService {
     constructor() {
         this.webhookSiteUrl = config.webhook.siteUrl;
         // הגדרת URL לשרת האוטומציה הפנימי
         this.automationServiceUrl = process.env.AUTOMATION_SERVICE_URL || 'http://localhost:4005/api/import-automation/direct-email-webhook';
+        
+        // שירות המוניטורינג יאותחל אחרי חיבור הדאטהבייס
+        this.monitoringService = null;
 
         // הגדרות Azure Storage
         this.azureConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING ;
@@ -34,55 +38,11 @@ class WebhookService {
         this.graphApiUrl = config.azure.graphApiUrl;
         this.accessToken = null;
 
-        // מערך כתובות מייל לאוטומציה - מעודכן לפי הדרישות החדשות
-        this.automationEmails = [
-            // כתובות פנימיות לטסטים - גרסאות עם אותיות קטנות וגדולות
-            'michal.l@neopharmgroup.com',
-            'michal.l@Neopharmgroup.com',
-            'cloudteamsdev@neopharmgroup.com',
-            'cloudteamsdev@Neopharmgroup.com',
-            'test@neopharmgroup.com',
-            'test@Neopharmgroup.com',
-            
-            // כתובות FEDEX מקוריות
-            'noreply@fedex.com',
-            'notification@fedex.com',
-            'tracking@fedex.com',
-            'shipment@fedex.com',
-            'express@fedex.com',
-            'import@fedex.com',
-            'documents@fedex.com',
-            
-            // כתובות UPS מקוריות
-            'noreply@ups.com',
-            'notification@ups.com',
-            'notifications@ups.com',
-            'tracking@ups.com',
-            'quantum@ups.com',
-            'import@ups.com',
-            'shipment@ups.com',
-            
-            // כתובות DHL מקוריות
-            'noreply@dhl.com',
-            'notification@dhl.com',
-            'tracking@dhl.com',
-            'express@dhl.com',
-            'logistics@dhl.com',
-            'import@dhl.com',
-            
-            // כתובות נוספות שעשויות להכיל מסמכי משלוח
-            'shipping@company.com',
-            'logistics@supplier.com',
-            'delivery@warehouse.com',
-            'orders@supplier.com',
-            'import@supplier.com',
-            'test@supplier.com',
-            
-            // כתובות כלליות
-            'documents@company.com',
-            'invoices@company.com',
-            'customs@company.com'
-        ];
+        // רשימת מיילים דינמית - תתעדכן מבסיס הנתונים
+        this.automationEmails = [];
+        this.isInitialized = false;
+        
+        // לא נטען עדיין - ננח חד לחיבור למסד הנתונים
 
         // בדיקה שblobStorageService טעון כראוי
         console.log(`🔧 blobStorageService זמין:`, {
@@ -93,42 +53,42 @@ class WebhookService {
         });
 
         // מיפוי ספקי שילוח לפי כתובת מייל ונושא
-        this.supplierMapping = {
-            // UPS
-            'ups': 'UPS',
-            'united parcel': 'UPS',
-            'ups.com': 'UPS',
-            'quantum view': 'UPS',
-            'ups import': 'UPS',
-            'ups notification': 'UPS',
-            'ups tracking': 'UPS',
+        // this.supplierMapping = {
+        //     // UPS
+        //     'ups': 'UPS',
+        //     'united parcel': 'UPS',
+        //     'ups.com': 'UPS',
+        //     'quantum view': 'UPS',
+        //     'ups import': 'UPS',
+        //     'ups notification': 'UPS',
+        //     'ups tracking': 'UPS',
 
-            // FedEx
-            'fedex': 'FEDEX',
-            'fed ex': 'FEDEX',
-            'federal express': 'FEDEX',
-            'fedex.com': 'FEDEX',
+        //     // FedEx
+        //     'fedex': 'FEDEX',
+        //     'fed ex': 'FEDEX',
+        //     'federal express': 'FEDEX',
+        //     'fedex.com': 'FEDEX',
 
-            // DHL
-            'dhl': 'DHL',
-            'dhl.com': 'DHL',
-            'dalsey': 'DHL',
-            'hillblom': 'DHL',
-            'lynn': 'DHL',
+        //     // DHL
+        //     'dhl': 'DHL',
+        //     'dhl.com': 'DHL',
+        //     'dalsey': 'DHL',
+        //     'hillblom': 'DHL',
+        //     'lynn': 'DHL',
 
-            // מיילים לבדיקה - נתייחס אליהם כספק UPS לצורך הבדיקה
-            'michal.l@neopharmgroup.com': 'UPS',
-            'neopharmgroup.com': 'UPS',
-            'cloudteamsdev@neopharmgroup.com': 'UPS',
+        //     // מיילים לבדיקה - נתייחס אליהם כספק UPS לצורך הבדיקה
+        //     'michal.l@neopharmgroup.com': 'UPS',
+        //     'neopharmgroup.com': 'UPS',
+        //     'cloudteamsdev@neopharmgroup.com': 'UPS',
 
-            // מילות מפתח נוספות
-            'tracking': null, // יחפש גם מילים אחרות
-            'shipment': null,
-            'delivery': null,
-            'משלוח': null,
-            'מעקב': null,
-            'חבילה': null
-        };
+        //     // מילות מפתח נוספות
+        //     'tracking': null, // יחפש גם מילים אחרות
+        //     'shipment': null,
+        //     'delivery': null,
+        //     'משלוח': null,
+        //     'מעקב': null,
+        //     'חבילה': null
+        // };
 
         // הוספת cache למניעת שליחות כפולות לאוטומציה
         this.sentToAutomationCache = new Map();
@@ -145,39 +105,39 @@ class WebhookService {
     }
 
     // זיהוי ספק שילוח לפי כתובת מייל ונושא ההודעה
-    identifySupplier(email, subject = '') {
-        const emailLower = email.toLowerCase();
-        const subjectLower = subject.toLowerCase();
+    // identifySupplier(email, subject = '') {
+    //     const emailLower = email.toLowerCase();
+    //     const subjectLower = subject.toLowerCase();
 
-        // חפש במייל ובנושא
-        const searchText = `${emailLower} ${subjectLower}`;
+    //     // חפש במייל ובנושא
+    //     const searchText = `${emailLower} ${subjectLower}`;
 
-        console.log(`🔍 מחפש ספק ב: "${email}" | "${subject}"`);
-        console.log(`🔍 טקסט חיפוש: "${searchText}"`);
+    //     console.log(`🔍 מחפש ספק ב: "${email}" | "${subject}"`);
+    //     console.log(`🔍 טקסט חיפוש: "${searchText}"`);
 
-        // תחילה חפש ספקים ספציפיים
-        for (const [keyword, supplier] of Object.entries(this.supplierMapping)) {
-            if (supplier && searchText.includes(keyword)) {
-                console.log(`✅ ספק ${supplier} זוהה לפי המילה "${keyword}"`);
-                return supplier;
-            }
-        }
+    //     // תחילה חפש ספקים ספציפיים
+    //     for (const [keyword, supplier] of Object.entries(this.supplierMapping)) {
+    //         if (supplier && searchText.includes(keyword)) {
+    //             console.log(`✅ ספק ${supplier} זוהה לפי המילה "${keyword}"`);
+    //             return supplier;
+    //         }
+    //     }
 
-        console.log(`🔍 בדיקת מילות מפתח: ${Object.keys(this.supplierMapping).filter(k => this.supplierMapping[k]).join(', ')}`);
+    //     console.log(`🔍 בדיקת מילות מפתח: ${Object.keys(this.supplierMapping).filter(k => this.supplierMapping[k]).join(', ')}`);
 
-        // אם לא נמצא ספק ספציפי, בדוק אם יש מילות מפתח של משלוח
-        const shippingKeywords = ['tracking', 'shipment', 'delivery', 'משלוח', 'מעקב', 'חבילה'];
-        const hasShippingKeyword = shippingKeywords.some(keyword => searchText.includes(keyword));
+    //     // אם לא נמצא ספק ספציפי, בדוק אם יש מילות מפתח של משלוח
+    //     const shippingKeywords = ['tracking', 'shipment', 'delivery', 'משלוח', 'מעקב', 'חבילה'];
+    //     const hasShippingKeyword = shippingKeywords.some(keyword => searchText.includes(keyword));
 
-        if (hasShippingKeyword) {
-            console.log(`📦 זוהה מייל משלוח אבל ספק לא זוהה עבור: ${email}`);
-            // אם זה נראה כמו מייל משלוח אבל הספק לא זוהה, החזר null אבל עם הערה
-            return 'UNKNOWN_SHIPPING';
-        }
+    //     if (hasShippingKeyword) {
+    //         console.log(`📦 זוהה מייל משלוח אבל ספק לא זוהה עבור: ${email}`);
+    //         // אם זה נראה כמו מייל משלוח אבל הספק לא זוהה, החזר null אבל עם הערה
+    //         return 'UNKNOWN_SHIPPING';
+    //     }
 
-        console.log(`❓ לא זוהה ספק או מילות מפתח של משלוח עבור: ${email}`);
-        return null;
-    }
+    //     console.log(`❓ לא זוהה ספק או מילות מפתח של משלוח עבור: ${email}`);
+    //     return null;
+    // }
 
     async processNotifications(notifications = []) {
         const results = [];
@@ -211,49 +171,7 @@ class WebhookService {
                 return { success: false, error: 'Subscription not found' };
             }
 
-            // שלב 1: בדיקה ראשונה - האם המייל נמצא ברשימת המיילים לניטור
-            const emailLower = subscription.email.toLowerCase();
-            
-            console.log(`🔍 בודק מייל ברשימת האוטומציה:`, {
-                email: subscription.email,
-                emailLower: emailLower,
-                automationEmailsLower: this.automationEmails.map(e => e.toLowerCase()),
-                isInListDirect: this.automationEmails.includes(emailLower),
-                isInListCaseInsensitive: this.automationEmails.map(e => e.toLowerCase()).includes(emailLower),
-                totalEmailsInList: this.automationEmails.length,
-                firstFewEmails: this.automationEmails.slice(0, 5)
-            });
-            
-            // בדיקה case-insensitive
-            const isInAutomationList = this.automationEmails.map(e => e.toLowerCase()).includes(emailLower);
-            
-            if (!isInAutomationList) {
-                console.log(`🚫 מייל ${subscription.email} לא נמצא ברשימת האוטומציה - מדלג על עיבוד`);
-                console.log(`📋 רשימת מיילים פעילה:`, this.automationEmails);
-                
-                // תיעוד התראה שדולגה
-                const emailNotification = await EmailNotification.create({
-                    email: subscription.email,
-                    subscriptionId: notification.subscriptionId,
-                    resource: notification.resource,
-                    changeType: notification.changeType,
-                    clientState: notification.clientState,
-                    messageId: notification.resource.split('/').pop(),
-                    processed: true,
-                    skipped: true,
-                    reason: 'Email not in automation list'
-                });
-                
-                return { 
-                    success: true, 
-                    message: 'Email not in automation list - skipped',
-                    skipped: true 
-                };
-            }
-
-            console.log(`✅ מייל ${subscription.email} נמצא ברשימת האוטומציה - ממשיך לבדיקת רלוונטיות`);
-
-            // שלב 2: קבלת פרטי המייל ובדיקת הנושא
+            // שלב 1: קבלת פרטי המייל
             const emailDetails = await this.getEmailDetails(subscription, notification.resource);
             
             if (!emailDetails) {
@@ -280,21 +198,41 @@ class WebhookService {
                 };
             }
 
-            // שלב 3: זיהוי ספק וסוג מסמך על בסיס כתובת השולח והנושא
-            const supplierResult = this.identifySupplierAndDocumentType(
-                emailDetails.sender,
-                emailDetails.subject,
-                emailDetails.attachments
-            );
+            // שלב 2: בדיקה מבוססת כללי מוניטורינג חדשים
+            // אם שירות המוניטורינג לא מוכן, אתחל אותו
+            if (!this.monitoringService) {
+                await this.initializeMonitoringService();
+            }
+            
+            let monitoringCheck;
+            if (this.monitoringService) {
+                monitoringCheck = await this.monitoringService.shouldProcessEmailForAutomation(
+                    subscription.email,
+                    emailDetails.sender,
+                    emailDetails.subject,
+                    emailDetails.bodyPreview
+                );
+            } else {
+                // במקרה של כשל באתחול, השתמש בלוגיקה הישנה
+                console.warn('⚠️ שירות מוניטורינג לא זמין, משתמש בלוגיקה ישנה');
+                const isInAutomationList = this.automationEmails.map(e => e.toLowerCase()).includes(subscription.email.toLowerCase());
+                monitoringCheck = {
+                    shouldProcess: isInAutomationList,
+                    reason: isInAutomationList ? 'Email in automation list (fallback)' : 'Email not in automation list (fallback)',
+                    matchingRules: [],
+                    forwardToAutomation: isInAutomationList
+                };
+            }
 
-            if (!supplierResult.isRelevant) {
-                console.log(`🚫 מייל לא רלוונטי לאוטומציה:`, {
-                    sender: emailDetails.sender,
+            if (!monitoringCheck.shouldProcess) {
+                console.log(`🚫 מייל לא עומד בכללי מוניטורינג:`, {
+                    toEmail: subscription.email,
+                    fromEmail: emailDetails.sender,
                     subject: emailDetails.subject,
-                    reason: supplierResult.reason
+                    reason: monitoringCheck.reason
                 });
 
-                // תיעוד מייל לא רלוונטי
+                // תיעוד מייל שלא עומד בכללים
                 const emailNotification = await EmailNotification.create({
                     email: subscription.email,
                     subscriptionId: notification.subscriptionId,
@@ -304,43 +242,230 @@ class WebhookService {
                     messageId: notification.resource.split('/').pop(),
                     processed: true,
                     skipped: true,
-                    reason: `Not relevant for automation: ${supplierResult.reason}`
+                    reason: `Monitoring rules: ${monitoringCheck.reason}`
                 });
                 
                 return { 
                     success: true, 
-                    message: `Email not relevant for automation: ${supplierResult.reason}`,
+                    message: `Email skipped: ${monitoringCheck.reason}`,
                     skipped: true,
-                    supplier: supplierResult.supplier,
-                    documentType: supplierResult.documentType
+                    monitoringReason: monitoringCheck.reason
                 };
             }
 
-            console.log(`✅ מייל רלוונטי לאוטומציה מזוהה:`, {
-                supplier: supplierResult.supplier,
-                documentType: supplierResult.documentType,
-                confidence: supplierResult.confidence,
-                reason: supplierResult.reason
+            console.log(`✅ מייל עומד בכללי מוניטורינג:`, {
+                matchingRules: monitoringCheck.matchingRules.length,
+                topRule: monitoringCheck.topRule?.ruleName,
+                priority: monitoringCheck.priority,
+                forwardToAutomation: monitoringCheck.forwardToAutomation
             });
 
-            // שלב 4: העברה לשירות האוטומציה עם המידע המועשר
-            emailDetails.supplierInfo = supplierResult;
+            // שלב 3: השתמש בספק שזוהה על ידי שירות המוניטורינג (MongoDB)
+            const supplier = monitoringCheck.supplier || monitoringCheck.identifiedSupplier;
+
+            // אם הספק לא זוהה או סומן כ-UNKNOWN/OTHER - דלג ותעד
+            if (!supplier || supplier === 'UNKNOWN' || supplier === 'OTHER') {
+                console.log(`❌ ספק לא זוהה או לא נתמך:`, {
+                    supplier,
+                    fromEmail: emailDetails.sender,
+                    subject: emailDetails.subject
+                });
+
+                await EmailNotification.create({
+                    email: subscription.email,
+                    subscriptionId: notification.subscriptionId,
+                    resource: notification.resource,
+                    changeType: notification.changeType,
+                    clientState: notification.clientState,
+                    messageId: notification.resource.split('/').pop(),
+                    processed: true,
+                    skipped: true,
+                    reason: `ספק לא זוהה: ${supplier}`
+                });
+
+                return {
+                    success: true,
+                    skipped: true,
+                    reason: `ספק לא זוהה: ${supplier}`
+                };
+            }
+
+            console.log(`✅ ספק ${supplier} זוהה מ-MongoDB דרך כלל "${monitoringCheck.topRule?.ruleName}"`);
+
+            // שלב 4: זיהוי סוג מסמך מהשם/נושא
+            const documentType = this.detectDocumentTypeFromFilename(
+                emailDetails.attachments?.[0]?.name || emailDetails.subject
+            );
+
+            // שלב 5: הכנת מידע מועשר מבוסס על כלל המוניטורינג
+            emailDetails.supplierInfo = {
+                supplier: supplier,
+                documentType: documentType,
+                confidence: monitoringCheck.topRule ? 0.95 : 0.7,
+                reason: monitoringCheck.reason,
+                matchedRule: monitoringCheck.topRule?.ruleName,
+                isRelevant: true
+            };
+
+            emailDetails.monitoringInfo = {
+                matchingRules: monitoringCheck.matchingRules.map(r => ({
+                    id: r._id,
+                    name: r.ruleName,
+                    priority: r.priority,
+                    supplier: r.supplier
+                })),
+                topRule: monitoringCheck.topRule ? {
+                    id: monitoringCheck.topRule._id,
+                    name: monitoringCheck.topRule.ruleName,
+                    priority: monitoringCheck.topRule.priority,
+                    supplier: monitoringCheck.topRule.supplier
+                } : null,
+                priority: monitoringCheck.priority,
+                notificationEmails: monitoringCheck.notificationEmails
+            };
+
+            // שלב 6: החלטה על העברה בהתבסס על targetService
+            const targetService = monitoringCheck.topRule?.targetService || 'automation';
+            
+            if (targetService === 'archive') {
+                console.log(`📝 מייל מתועד בלבד (לא מועבר לשום שירות) לפי כללי המוניטורינג`);
+                
+                const emailNotification = await EmailNotification.create({
+                    email: subscription.email,
+                    subscriptionId: notification.subscriptionId,
+                    resource: notification.resource,
+                    changeType: notification.changeType,
+                    clientState: notification.clientState,
+                    messageId: notification.resource.split('/').pop(),
+                    processed: true,
+                    skipped: false,
+                    reason: 'Archived only per monitoring rules (targetService: archive)'
+                });
+                
+                return { 
+                    success: true, 
+                    message: 'Email archived only per monitoring rules',
+                    skipped: false,
+                    recorded: true,
+                    targetService: 'archive'
+                };
+            }
+
+            // שלב 5: העברה לשירות המתאים - supplierInfo ו-monitoringInfo כבר הוכנסו קודם
             
             if (emailDetails.hasAttachments && emailDetails.azureUrls) {
                 console.log(`📎 מייל כולל ${emailDetails.azureUrls.length} קבצים מצורפים ב-Azure`);
             }
 
             try {
-                const automationResult = await this.sendToAutomationService(emailDetails, subscription, notification);
+                let serviceResult;
                 
-                if (automationResult.success) {
-                    console.log(`✅ מייל נשלח בהצלחה לשירות האוטומציה`);
-                } else {
-                    console.log(`⚠️ שליחה לאוטומציה נכשלה אבל נותר מתועד:`, automationResult.error);
+                if (targetService === 'automation') {
+                    // שליחה לשירות האוטומציה הרגיל
+                    serviceResult = await this.sendToAutomationService(emailDetails, subscription, notification);
+                    
+                    if (serviceResult.success) {
+                        console.log(`✅ מייל נשלח בהצלחה לשירות האוטומציה`);
+                    } else {
+                        console.log(`⚠️ שליחה לאוטומציה נכשלה אבל נותר מתועד:`, serviceResult.error);
+                    }
+                } else if (targetService === 'custom') {
+                    // שליחה לשירות מותאם אישית
+                    const customUrl = monitoringCheck.topRule?.customServiceUrl;
+                    const customMethod = monitoringCheck.topRule?.customServiceMethod || 'POST';
+                    
+                    if (customUrl) {
+                        serviceResult = await this.sendToCustomService(emailDetails, subscription, notification, customUrl, customMethod);
+                        
+                        if (serviceResult.success) {
+                            console.log(`✅ מייל נשלח בהצלחה לשירות מותאם: ${customUrl}`);
+                        } else {
+                            console.log(`⚠️ שליחה לשירות מותאם נכשלה:`, serviceResult.error);
+                        }
+                    } else {
+                        console.error(`❌ שירות מותאם נבחר אבל URL לא הוגדר`);
+                        serviceResult = { success: false, error: 'Custom service URL not configured' };
+                    }
                 }
-            } catch (automationError) {
-                console.error(`❌ שגיאה בשליחה לאוטומציה:`, automationError.message);
-                // אל נכשל את כל התהליך בגלל שגיאה באוטומציה
+                
+                // עדכון סטטיסטיקות כללי המוניטורינג
+                if (serviceResult && serviceResult.success) {
+                    await this.monitoringService.recordSuccessfulForward(monitoringCheck.matchingRules);
+                }
+
+                // תיעוד המייל בבסיס הנתונים לצורך לוגים
+                try {
+                    const EmailNotification = require('../models/EmailNotification');
+                    await EmailNotification.create({
+                        email: subscription.email,
+                        subscriptionId: notification.subscriptionId,
+                        resource: notification.resource,
+                        changeType: notification.changeType,
+                        clientState: notification.clientState,
+                        messageId: notification.resource.split('/').pop(),
+                        processed: true,
+                        skipped: false,
+                        targetService: targetService,
+                        customServiceUrl: targetService === 'custom' ? monitoringCheck.topRule?.customServiceUrl : undefined,
+                        reason: `Successfully forwarded to ${targetService}`,
+                        
+                        // הוספת מידע מועשר על המייל
+                        supplierInfo: emailDetails.supplierInfo,
+                        monitoringInfo: emailDetails.monitoringInfo,
+                        extractedData: {
+                            trackingNumber: emailDetails.supplierInfo?.trackingNumber,
+                            poNumber: emailDetails.supplierInfo?.poNumber,
+                            weight: emailDetails.supplierInfo?.weight,
+                            weightUnit: emailDetails.supplierInfo?.weightUnit,
+                            confidence: emailDetails.supplierInfo?.confidence,
+                            supplierName: emailDetails.supplierInfo?.supplierName,
+                            documentType: emailDetails.supplierInfo?.documentType
+                        },
+                        
+                        // מידע על המייל עצמו
+                        emailInfo: {
+                            fromEmail: emailDetails.sender,
+                            subject: emailDetails.subject,
+                            hasAttachments: emailDetails.hasAttachments,
+                            attachmentCount: emailDetails.attachments?.length || 0
+                        },
+                        
+                        hasErrors: serviceResult ? !serviceResult.success : false
+                    });
+                    
+                    console.log(`📝 מייל תועד בבסיס הנתונים לצורך לוגים`);
+                } catch (dbError) {
+                    console.error(`⚠️ שגיאה בתיעוד מייל במסד הנתונים:`, dbError);
+                }
+                
+            } catch (serviceError) {
+                console.error(`❌ שגיאה בשליחה לשירות (${targetService}):`, serviceError.message);
+                
+                // תיעוד שגיאה במסד הנתונים
+                try {
+                    const EmailNotification = require('../models/EmailNotification');
+                    await EmailNotification.create({
+                        email: subscription.email,
+                        subscriptionId: notification.subscriptionId,
+                        resource: notification.resource,
+                        changeType: notification.changeType,
+                        clientState: notification.clientState,
+                        messageId: notification.resource.split('/').pop(),
+                        processed: false,
+                        skipped: false,
+                        targetService: targetService,
+                        hasErrors: true,
+                        reason: `Service error: ${serviceError.message}`,
+                        supplierInfo: emailDetails.supplierInfo,
+                        emailInfo: {
+                            fromEmail: emailDetails.sender,
+                            subject: emailDetails.subject,
+                            hasAttachments: emailDetails.hasAttachments
+                        }
+                    });
+                } catch (dbError) {
+                    console.error(`⚠️ שגיאה בתיעוד שגיאה במסד הנתונים:`, dbError);
+                }
             }
 
             return { success: true, message: 'Notification processed successfully' };
@@ -1219,95 +1344,120 @@ class WebhookService {
         return result;
     }
 
+    // זיהוי סוג מסמך פשוט מתוך שם קובץ או נושא
+    detectDocumentTypeFromFilename(nameOrSubject) {
+        if (!nameOrSubject || typeof nameOrSubject !== 'string') return null;
+
+        const text = nameOrSubject.toLowerCase();
+
+        if (text.includes('invoice') || text.includes('tax') || text.includes('חשבונית')) {
+            return 'INVOICE';
+        }
+
+        if (text.includes('pro-forma') || text.includes('pro forma') || text.includes('proforma')) {
+            return 'PROFORMA_INVOICE';
+        }
+
+        if (text.includes('awb') || text.includes('tracking') || text.includes('shipment')) {
+            return 'BILL_OF_LADING';
+        }
+
+        if (text.includes('declaration') || text.includes('customs') || text.includes('declar')) {
+            return 'DECLARATION';
+        }
+
+        return 'GENERAL_DOCUMENT';
+    }
+
     // בדיקות ספציפיות לכל ספק
-    isFedexEmail(emailLower, subjectLower, attachments) {
-        const fedexIndicators = [
-            'fedex', 'fed ex', 'federal express',
-            'fedex.com', 'fedex.co.il'
-        ];
+    // isFedexEmail(emailLower, subjectLower, attachments) {
+    //     const fedexIndicators = [
+    //         'fedex', 'fed ex', 'federal express',
+    //         'fedex.com', 'fedex.co.il'
+    //     ];
         
-        const hasFedexKeyword = fedexIndicators.some(keyword => 
-            emailLower.includes(keyword) || subjectLower.includes(keyword)
-        );
+    //     const hasFedexKeyword = fedexIndicators.some(keyword => 
+    //         emailLower.includes(keyword) || subjectLower.includes(keyword)
+    //     );
         
-        // בדיקה לפי הדוגמאות שנתת
-        const hasFedexSubjectPattern = subjectLower.includes('fedex scanned documents for cust');
+    //     // בדיקה לפי הדוגמאות שנתת
+    //     const hasFedexSubjectPattern = subjectLower.includes('fedex scanned documents for cust');
         
-        return hasFedexKeyword || hasFedexSubjectPattern;
-    }
+    //     return hasFedexKeyword || hasFedexSubjectPattern;
+    // }
 
-    isFedexInitialDocument(subjectLower, attachments) {
-        // דוגמה: "FedEx Scanned Documents for cust 27823 ELDAN ELECTRONIC INSTRUMENT, AWB: 450277523095"
-        const hasAwbPattern = subjectLower.includes('awb:') && /awb:\s*\d+/.test(subjectLower);
+    // isFedexInitialDocument(subjectLower, attachments) {
+    //     // דוגמה: "FedEx Scanned Documents for cust 27823 ELDAN ELECTRONIC INSTRUMENT, AWB: 450277523095"
+    //     const hasAwbPattern = subjectLower.includes('awb:') && /awb:\s*\d+/.test(subjectLower);
         
-        // בדיקה שאין מסמך DECLARATION בקבצים המצורפים
-        const hasDeclarationDoc = attachments.some(att => {
-            const fileName = (att.name || att.originalname || '').toLowerCase();
-            return fileName.startsWith('declaration');
-        });
+    //     // בדיקה שאין מסמך DECLARATION בקבצים המצורפים
+    //     const hasDeclarationDoc = attachments.some(att => {
+    //         const fileName = (att.name || att.originalname || '').toLowerCase();
+    //         return fileName.startsWith('declaration');
+    //     });
         
-        return hasAwbPattern && !hasDeclarationDoc;
-    }
+    //     return hasAwbPattern && !hasDeclarationDoc;
+    // }
 
-    isFedexDeclarationDocument(subjectLower, attachments) {
-        // אותו נושא כמו המסמך הראשוני אבל עם מסמך DECLARATION
-        const hasAwbPattern = subjectLower.includes('awb:') && /awb:\s*\d+/.test(subjectLower);
+    // isFedexDeclarationDocument(subjectLower, attachments) {
+    //     // אותו נושא כמו המסמך הראשוני אבל עם מסמך DECLARATION
+    //     const hasAwbPattern = subjectLower.includes('awb:') && /awb:\s*\d+/.test(subjectLower);
         
-        const hasDeclarationDoc = attachments.some(att => {
-            const fileName = (att.name || att.originalname || '').toLowerCase();
-            return fileName.startsWith('declaration');
-        });
+    //     const hasDeclarationDoc = attachments.some(att => {
+    //         const fileName = (att.name || att.originalname || '').toLowerCase();
+    //         return fileName.startsWith('declaration');
+    //     });
         
-        return hasAwbPattern && hasDeclarationDoc;
-    }
+    //     return hasAwbPattern && hasDeclarationDoc;
+    // }
 
-    isUpsEmail(emailLower, subjectLower, attachments) {
-        const upsIndicators = [
-            'ups', 'united parcel', 'ups.com', 'ups.co.il',
-            'quantum', 'neopharmgroup.com' // הוספתי neopharmgroup לטסטים
-        ];
+    // isUpsEmail(emailLower, subjectLower, attachments) {
+    //     const upsIndicators = [
+    //         'ups', 'united parcel', 'ups.com', 'ups.co.il',
+    //         'quantum', 'neopharmgroup.com' // הוספתי neopharmgroup לטסטים
+    //     ];
         
-        return upsIndicators.some(keyword => 
-            emailLower.includes(keyword) || subjectLower.includes(keyword)
-        );
-    }
+    //     return upsIndicators.some(keyword => 
+    //         emailLower.includes(keyword) || subjectLower.includes(keyword)
+    //     );
+    // }
 
-    isUpsBulkStatusReport(subjectLower) {
-        // דוגמה: "UPS Import Shipment Status Report"
-        return subjectLower.includes('ups import shipment status report');
-    }
+    // isUpsBulkStatusReport(subjectLower) {
+    //     // דוגמה: "UPS Import Shipment Status Report"
+    //     return subjectLower.includes('ups import shipment status report');
+    // }
 
-    isUpsIndividualNotification(subjectLower) {
-        // דוגמה: "UPS Import notification - Tracking # 1Z8E615X6702081284 - Pro-Forma Invoice # 3625971"
-        const hasTrackingPattern = subjectLower.includes('ups import notification') && 
-                                  subjectLower.includes('tracking #');
+    // isUpsIndividualNotification(subjectLower) {
+    //     // דוגמה: "UPS Import notification - Tracking # 1Z8E615X6702081284 - Pro-Forma Invoice # 3625971"
+    //     const hasTrackingPattern = subjectLower.includes('ups import notification') && 
+    //                               subjectLower.includes('tracking #');
         
-        const hasProFormaPattern = subjectLower.includes('pro-forma invoice #');
+    //     const hasProFormaPattern = subjectLower.includes('pro-forma invoice #');
         
-        return hasTrackingPattern || hasProFormaPattern;
-    }
+    //     return hasTrackingPattern || hasProFormaPattern;
+    // }
 
-    isDhlEmail(emailLower, subjectLower) {
-        const dhlIndicators = [
-            'dhl', 'dalsey', 'dhl.com', 'dhl.co.il'
-        ];
+    // isDhlEmail(emailLower, subjectLower) {
+    //     const dhlIndicators = [
+    //         'dhl', 'dalsey', 'dhl.com', 'dhl.co.il'
+    //     ];
         
-        return dhlIndicators.some(keyword => 
-            emailLower.includes(keyword) || subjectLower.includes(keyword)
-        );
-    }
+    //     return dhlIndicators.some(keyword => 
+    //         emailLower.includes(keyword) || subjectLower.includes(keyword)
+    //     );
+    // }
 
-    hasShippingKeywords(searchText) {
-        const shippingKeywords = [
-            'tracking', 'shipment', 'delivery', 'awb', 'bill of lading',
-            'invoice', 'customs', 'freight', 'cargo', 'container', 'manifest',
-            'import', 'export', 'משלוח', 'מעקב', 'חבילה', 'יבוא', 'יצוא'
-        ];
+    // hasShippingKeywords(searchText) {
+    //     const shippingKeywords = [
+    //         'tracking', 'shipment', 'delivery', 'awb', 'bill of lading',
+    //         'invoice', 'customs', 'freight', 'cargo', 'container', 'manifest',
+    //         'import', 'export', 'משלוח', 'מעקב', 'חבילה', 'יבוא', 'יצוא'
+    //     ];
         
-        return shippingKeywords.some(keyword => 
-            searchText.includes(keyword.toLowerCase())
-        );
-    }
+    //     return shippingKeywords.some(keyword => 
+    //         searchText.includes(keyword.toLowerCase())
+    //     );
+    // }
 
     // פונקציות ניהול רשימת מיילים מתקדמות
     
@@ -1450,6 +1600,333 @@ class WebhookService {
         });
         
         return results;
+    }
+
+    // ========== פונקציות לניהול דינמי של הגדרות מיילים ==========
+
+    // טעינת הגדרות מיילים מבסיס הנתונים
+    async loadEmailConfigurationsFromDatabase() {
+        try {
+            const { EmailConfiguration } = require('../models');
+            
+            // אתחול הגדרות ברירת מחדל אם צריך
+            await EmailConfiguration.initializeDefaultConfigurations();
+            
+            // קבלת ההגדרות הפעילות
+            const emailData = await EmailConfiguration.getEmailsForWebhookService();
+            
+            this.automationEmails = emailData.emails;
+            this.updateSupplierMapping(emailData.supplierMapping);
+            
+            console.log(`✅ נטענו ${this.automationEmails.length} הגדרות מייל מבסיס הנתונים`);
+            console.log(`📧 מיילים פעילים:`, this.automationEmails.slice(0, 5).join(', ') + 
+                (this.automationEmails.length > 5 ? ` ו-${this.automationEmails.length - 5} נוספים...` : ''));
+                
+        } catch (error) {
+            console.error('❌ שגיאה בטעינת הגדרות מיילים:', error);
+            // נסה להשתמש ברשימה הקיימת או ברירת מחדל
+            this.fallbackToDefaultEmails();
+        }
+    }
+
+    // // שימוש ברשימה ברירת מחדל במקרה של שגיאה
+    // fallbackToDefaultEmails() {
+    //     console.warn('⚠️ משתמש ברשימת מיילים ברירת מחדל');
+    //     this.automationEmails = [
+    //         'michal.l@neopharmgroup.com',
+    //         'cloudteamsdev@neopharmgroup.com',
+    //         'test@neopharmgroup.com',
+    //         'noreply@fedex.com',
+    //         'notification@fedex.com',
+    //         'noreply@ups.com',
+    //         'notification@ups.com',
+    //         'noreply@dhl.com'
+    //     ];
+    // }
+
+    // עדכון רשימת המיילים (נקרא מהcontroller)
+    updateAutomationEmails(newEmails) {
+        this.automationEmails = newEmails.map(email => email.toLowerCase());
+        console.log(`🔄 רשימת מיילים עודכנה: ${this.automationEmails.length} מיילים`);
+    }
+
+    // עדכון מיפוי ספקים (נקרא מהcontroller)
+    // updateSupplierMapping(newMapping) {
+    //     // שמור את המיפויים הבסיסיים
+    //     const baseMapping = {
+    //         // UPS
+    //         'ups': 'UPS',
+    //         'united parcel': 'UPS',
+    //         'ups.com': 'UPS',
+    //         'quantum view': 'UPS',
+    //         'ups import': 'UPS',
+    //         'ups notification': 'UPS',
+    //         'ups tracking': 'UPS',
+
+    //         // FedEx
+    //         'fedex': 'FEDEX',
+    //         'fed ex': 'FEDEX',
+    //         'federal express': 'FEDEX',
+    //         'fedex.com': 'FEDEX',
+
+    //         // DHL
+    //         'dhl': 'DHL',
+    //         'dhl.com': 'DHL',
+    //         'dalsey': 'DHL',
+    //         'hillblom': 'DHL',
+    //         'lynn': 'DHL',
+
+    //         // מילות מפתח נוספות
+    //         'tracking': null,
+    //         'shipment': null,
+    //         'delivery': null,
+    //         'משלוח': null,
+    //         'מעקב': null,
+    //         'חבילה': null
+    //     };
+
+    //     // מיזוג עם המיפויים החדשים מבסיס הנתונים
+    //     this.supplierMapping = { ...baseMapping, ...newMapping };
+        
+    //     console.log(`🔄 מיפוי ספקים עודכן עם ${Object.keys(newMapping).length} הגדרות מותאמות אישית`);
+    // }
+
+    // אתחול שירות המוניטורינג (נקרא אחרי חיבור הדאטהבייס)
+    async initializeMonitoringService() {
+        try {
+            if (!this.monitoringService) {
+                const MonitoringService = require('./MonitoringService');
+                this.monitoringService = new MonitoringService();
+                console.log('✅ שירות המוניטורינג אותחל בהצלחה');
+            }
+        } catch (error) {
+            console.error('❌ שגיאה באתחול שירות המוניטורינג:', error);
+        }
+    }
+
+    // רענון הגדרות מבסיס הנתונים (לשימוש ידני או תזמון)
+    // פונקציית אתחול שמחכה לחיבור למסד הנתונים
+    async initialize() {
+        if (this.isInitialized) {
+            return;
+        }
+
+        try {
+            console.log('🔄 מאתחל WebhookService...');
+            await this.loadEmailConfigurationsFromDatabase();
+            this.isInitialized = true;
+            console.log('✅ WebhookService אותחל בהצלחה');
+        } catch (error) {
+            console.error('❌ שגיאה באתחול WebhookService:', error);
+            this.fallbackToDefaultEmails();
+            this.isInitialized = true; // חשוב להגדיר גם במקרה של שגיאה
+        }
+    }
+
+    async refreshConfigurationsFromDatabase() {
+        console.log('🔄 מרענן הגדרות מיילים מבסיס הנתונים...');
+        await this.loadEmailConfigurationsFromDatabase();
+        
+        // אתחול שירות המוניטורינג אם עדיין לא קיים
+        if (!this.monitoringService) {
+            await this.initializeMonitoringService();
+        }
+        
+        // רענון גם של שירות המוניטורינג
+        if (this.monitoringService) {
+            await this.monitoringService.refreshCache();
+        }
+        
+        return {
+            success: true,
+            emailsCount: this.automationEmails.length,
+            emails: this.automationEmails,
+            monitoringService: this.monitoringService ? 'refreshed' : 'not available'
+        };
+    }
+
+    // ===== פונקציות חדשות לעבודה עם כללי מוניטורינג =====
+
+    // קבלת סטטיסטיקות מוניטורינג
+    async getMonitoringStatistics() {
+        if (!this.monitoringService) {
+            return { error: 'Monitoring service not available' };
+        }
+        
+        return await this.monitoringService.getMonitoringStatistics();
+    }
+
+    // קבלת כתובות מייל מנוטרות
+    async getMonitoredEmailAddresses() {
+        if (!this.monitoringService) {
+            // Fallback to old method
+            return this.automationEmails;
+        }
+        
+        return await this.monitoringService.getMonitoredEmailAddresses();
+    }
+
+    // בדיקת כללים הזקוקים לתשומת לב
+    async getRulesNeedingAttention() {
+        if (!this.monitoringService) {
+            return [];
+        }
+        
+        return await this.monitoringService.getRulesNeedingAttention();
+    }
+
+    // רענון מטמון כללי מוניטורינג
+    async refreshMonitoringCache() {
+        if (!this.monitoringService) {
+            return { error: 'Monitoring service not available' };
+        }
+        
+        return await this.monitoringService.refreshCache();
+    }
+
+    // קבלת סטטיסטיקות מטמון
+    getMonitoringCacheStatistics() {
+        if (!this.monitoringService) {
+            return { error: 'Monitoring service not available' };
+        }
+        
+        return this.monitoringService.getCacheStatistics();
+    }
+
+    // קבלת הגדרות נוכחיות (לדיבוג ומעקב)
+    getCurrentConfigurations() {
+        return {
+            automationEmails: [...this.automationEmails],
+            supplierMapping: { ...this.supplierMapping },
+            emailsCount: this.automationEmails.length,
+            lastUpdated: new Date().toISOString()
+        };
+    }
+
+    // שליחה לשירות מותאם אישית
+    async sendToCustomService(emailDetails, subscription, notification, customUrl, method = 'POST') {
+        try {
+            console.log(`🔧 מייל מ-${subscription.email} מועבר לשירות מותאם: ${customUrl}`);
+            
+            // יצירת מזהה ייחודי לאותו מייל
+            const messageId = emailDetails.id || notification.resource.split('/').pop();
+            const emailCacheKey = `custom-${subscription.email}-${messageId}`;
+            
+            // בדיקה אם כבר נשלח לשירות המותאם
+            if (this.sentToAutomationCache.has(emailCacheKey)) {
+                const sentTime = this.sentToAutomationCache.get(emailCacheKey);
+                console.log(`🔄 מייל כבר נשלח לשירות מותאם בזמן ${sentTime}, מדלג`);
+                return { 
+                    success: true, 
+                    message: 'Email already sent to custom service',
+                    duplicate: true,
+                    sentAt: sentTime
+                };
+            }
+            
+            // הכנת הנתונים לשליחה
+            const payload = {
+                type: 'email_notification',
+                timestamp: new Date().toISOString(),
+                email: {
+                    from: emailDetails.sender,
+                    to: subscription.email,
+                    subject: emailDetails.subject,
+                    body: emailDetails.body,
+                    hasAttachments: emailDetails.hasAttachments,
+                    attachments: emailDetails.attachments || []
+                },
+                subscription: {
+                    email: subscription.email,
+                    subscriptionId: notification.subscriptionId
+                },
+                monitoringInfo: emailDetails.monitoringInfo,
+                supplierInfo: emailDetails.supplierInfo
+            };
+            
+            // שליחה לשירות המותאם
+            const axios = require('axios');
+            const response = await axios({
+                method: method,
+                url: customUrl,
+                data: payload,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'NeoPharma-EmailWebhook/1.0'
+                },
+                timeout: 30000 // 30 שניות timeout
+            });
+            
+            if (response.status >= 200 && response.status < 300) {
+                // שמירת זמן שליחה למניעת כפילות
+                this.sentToAutomationCache.set(emailCacheKey, new Date().toISOString());
+                
+                console.log(`✅ מייל נשלח בהצלחה לשירות מותאם`);
+                
+                // תיעוד בבסיס הנתונים
+                try {
+                    const EmailNotification = require('../models/EmailNotification');
+                    await EmailNotification.create({
+                        email: subscription.email,
+                        subscriptionId: notification.subscriptionId,
+                        resource: notification.resource,
+                        changeType: notification.changeType,
+                        clientState: notification.clientState,
+                        messageId: messageId,
+                        processed: true,
+                        skipped: false,
+                        targetService: 'custom',
+                        customServiceUrl: customUrl,
+                        reason: `Forwarded to custom service: ${customUrl}`
+                    });
+                } catch (dbError) {
+                    console.error(`⚠️ שגיאה בתיעוד במסד הנתונים:`, dbError);
+                }
+                
+                return { 
+                    success: true, 
+                    message: 'Email sent to custom service successfully',
+                    response: response.data 
+                };
+            } else {
+                throw new Error(`Custom service responded with status ${response.status}`);
+            }
+            
+        } catch (error) {
+            console.error(`❌ שגיאה בשליחה לשירות מותאם:`, error.message);
+            
+            // תיעוד השגיאה
+            try {
+                const EmailNotification = require('../models/EmailNotification');
+                await EmailNotification.create({
+                    email: subscription.email,
+                    subscriptionId: notification.subscriptionId,
+                    resource: notification.resource,
+                    changeType: notification.changeType,
+                    clientState: notification.clientState,
+                    messageId: emailDetails.id || notification.resource.split('/').pop(),
+                    processed: false,
+                    skipped: true,
+                    targetService: 'custom',
+                    customServiceUrl: customUrl,
+                    reason: `Custom service error: ${error.message}`
+                });
+            } catch (dbError) {
+                console.error(`⚠️ שגיאה בתיעוד השגיאה במסד הנתונים:`, dbError);
+            }
+            
+            return { 
+                success: false, 
+                error: error.message,
+                customUrl: customUrl 
+            };
+        }
+    }
+
+    // בדיקה אם יש צורך ברענון (לשימוש עתידי)
+    shouldRefreshConfigurations() {
+        // אפשר להוסיף לוגיקה של cache expiry או triggers
+        return true;
     }
 }
 

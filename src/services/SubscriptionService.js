@@ -10,6 +10,8 @@ class SubscriptionService {
     }
 
     async createSubscription(subscriptionData) {
+        console.log(`🐛 DEBUG SERVICE: subscriptionData =`, subscriptionData);
+        
         const {
             email,
             createdBy,
@@ -17,6 +19,8 @@ class SubscriptionService {
             changeType = 'created',
             expirationHours = this.defaultExpirationHours
         } = subscriptionData;
+
+        console.log(`🐛 DEBUG SERVICE: extracted email = ${email}`);
 
         try {
             console.log(`🔄 יוצר subscription עבור ${email}`);
@@ -69,6 +73,12 @@ class SubscriptionService {
     async renewSubscription(subscriptionId, renewedBy, expirationHours = this.defaultExpirationHours) {
         try {
             console.log(`🔄 מחדש subscription: ${subscriptionId}`);
+
+            // ולידציה של subscriptionId - בדיקה שזה GUID תקין
+            if (!this._isValidGuid(subscriptionId)) {
+                console.warn(`⚠️ Subscription ID לא תקין: ${subscriptionId} - מדלג`);
+                throw new Error('Subscription ID format is invalid');
+            }
 
             const token = await AzureAuthService.getServicePrincipalToken();
             const newExpirationDateTime = new Date(Date.now() + (expirationHours * 60 * 60 * 1000)).toISOString();
@@ -255,6 +265,24 @@ class SubscriptionService {
         }
 
         return error;
+    }
+
+    // פונקציית עזר לולידציה של GUID
+    _isValidGuid(guid) {
+        if (!guid || typeof guid !== 'string') {
+            return false;
+        }
+        
+        // בדיקה של פורמט GUID סטנדרטי
+        const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        
+        // בדיקה שזה לא GUID של אפסים
+        const isAllZeros = guid === '00000000-0000-0000-0000-000000000000';
+        
+        // בדיקה שזה לא test subscription
+        const isTestSubscription = guid.includes('test-subscription');
+        
+        return guidRegex.test(guid) && !isAllZeros && !isTestSubscription;
     }
 }
 

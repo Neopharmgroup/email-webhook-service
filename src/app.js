@@ -17,6 +17,7 @@ const database = require('./database/connection');
 const routes = require('./routes');
 const { corsMiddleware, requestLogger, errorHandler } = require('./middleware');
 const { logger } = require('./utils');
+const { AutoRenewalService, WebhookService } = require('./services');
 
 class EmailWebhookService {
     constructor() {
@@ -157,8 +158,14 @@ class EmailWebhookService {
         try {
             const port = config.port;
 
-            this.server = this.app.listen(port, () => {
+            this.server = this.app.listen(port, async () => {
                 this.logStartupInfo(port);
+                
+                // טען הגדרות מיילים מבסיס הנתונים
+                await this.loadWebhookServiceConfigurations();
+                
+                // הפעל את שירות החידוש האוטומטי
+                this.startAutoRenewalService();
             });
 
             // Graceful shutdown handlers
@@ -200,6 +207,30 @@ class EmailWebhookService {
         logger.info('🚀 Server started successfully', { port, environment: config.nodeEnv });
     }
 
+    startAutoRenewalService() {
+        try {
+            // הפעל את שירות החידוש האוטומטי
+            AutoRenewalService.start();
+            logger.info('🔄 Auto-renewal service הופעל אוטומטית');
+        } catch (error) {
+            logger.error('❌ שגיאה בהפעלת Auto-renewal service:', error);
+        }
+    }
+
+    async loadWebhookServiceConfigurations() {
+        try {
+            // אתחל את WebhookService לראשונה
+            await WebhookService.initialize();
+            logger.info('📧 הגדרות מיילים נטענו מבסיס הנתונים');
+            
+            // אתחל את שירות המוניטורינג
+            await WebhookService.initializeMonitoringService();
+            logger.info('🔍 שירות מוניטורינג אותחל בהצלחה');
+        } catch (error) {
+            logger.error('❌ שגיאה בטעינת הגדרות מיילים:', error);
+        }  
+    }
+
     setupGracefulShutdown() {
         const gracefulShutdown = async (signal) => {
             logger.info(`📶 Received ${signal}, starting graceful shutdown...`);
@@ -207,6 +238,14 @@ class EmailWebhookService {
             if (this.server) {
                 this.server.close(async () => {
                     logger.info('🔌 HTTP server closed');
+
+                    // Stop auto-renewal service
+                    try {
+                        AutoRenewalService.stop();
+                        logger.info('🔄 Auto-renewal service stopped');
+                    } catch (error) {
+                        logger.error('❌ Error stopping Auto-renewal service', error);
+                    }
 
                     // Close database connection
                     try {
