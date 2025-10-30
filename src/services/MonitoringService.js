@@ -118,6 +118,16 @@ class MonitoringService {
         if (emailLower.includes('@dhl.com') || combined.includes('dhl')) {
             return 'DHL';
         }
+        
+        // 🆕 זיהוי רשומון DHL (מכתובת פנימית)
+        if (subjectLower.includes('רשומון') || 
+            subjectLower.includes('reshimon') ||
+            subjectLower.includes('הצהרות יבוא') ||
+            subjectLower.includes('דוח הצהרות')) {
+            console.log(`📋 זוהה רשומון DHL מנושא: "${subject}"`);
+            return 'DHL';
+        }
+        
         console.log(`🤔 לא זוהה ספק מהמייל ${fromEmail}, מסווג כ-OTHER`);
         return 'OTHER';
     }
@@ -239,29 +249,33 @@ class MonitoringService {
             console.log(`👤 שולח: ${fromEmail}`);
             console.log(`📝 נושא: "${subject}"`);
 
-            // זיהוי ספק מהמייל (כ-fallback)
-            const identifiedSupplier = this.identifySupplierFromEmail(fromEmail, subject, bodyPreview);
-            console.log(`🏢 ספק מזוהה מתוכן: ${identifiedSupplier}`);
-
+            // 🔄 שינוי סדר: קודם בודקים כללים, רק אז מזהים ספק כ-fallback
             // קבלת כל הכללים הפעילים
             const rules = await this.getAllActiveRulesFromDatabase();
 
             if (rules.length === 0) {
                 console.log(`🚫 אין כללי מוניטורינג פעילים במערכת`);
+                
+                // רק עכשיו נזהה ספק כ-fallback
+                const identifiedSupplier = this.identifySupplierFromEmail(fromEmail, subject, bodyPreview);
+                console.log(`🤔 לא נמצאו כללים, מזהה ספק מהמייל: ${identifiedSupplier}`);
+                
                 return {
                     shouldProcess: false,
                     reason: 'לא נמצאו כללי מוניטורינג פעילים במערכת',
                     matchingRules: [],
                     forwardToAutomation: false,
-                    supplier: null, // ✅ וודא שזה מוחזר
+                    supplier: identifiedSupplier,
                     identifiedSupplier
                 };
             }
 
             const matchingRules = [];
 
+            // בדיקת כללים ללא זיהוי ספק מוקדם
             for (const rule of rules) {
-                if (this.checkRuleMatch(rule, fromEmail, subject, identifiedSupplier)) {
+                // ✅ העברת null במקום identifiedSupplier כדי שהכלל יקבע את הספק
+                if (this.checkRuleMatch(rule, fromEmail, subject, null)) {
                     matchingRules.push(rule);
                     await this.incrementRuleMatches(rule._id);
                 }
@@ -269,13 +283,18 @@ class MonitoringService {
 
             if (matchingRules.length === 0) {
                 console.log(`🚫 מייל לא תואם לאף כלל`);
+                
+                // רק עכשיו נזהה ספק כ-fallback
+                const identifiedSupplier = this.identifySupplierFromEmail(fromEmail, subject, bodyPreview);
+                console.log(`🤔 לא נמצא כלל תואם, מזהה ספק מהמייל: ${identifiedSupplier}`);
+                
                 return {
                     shouldProcess: false,
                     reason: 'המייל לא תואם לאף כלל מוניטורינג',
                     matchingRules: [],
                     availableRules: rules.length,
                     forwardToAutomation: false,
-                    supplier: null, // ✅ וודא שזה מוחזר
+                    supplier: identifiedSupplier,
                     identifiedSupplier
                 };
             }
@@ -291,6 +310,12 @@ class MonitoringService {
             const topRule = matchingRules[0];
 
             console.log(`✅ מייל תואם לכלל "${topRule.ruleName}" עבור ספק ${topRule.supplier}`);
+            
+            // זיהוי ספק מהמייל רק למידע נוסף
+            const identifiedSupplier = this.identifySupplierFromEmail(fromEmail, subject, bodyPreview);
+            if (identifiedSupplier !== topRule.supplier && identifiedSupplier !== 'OTHER') {
+                console.log(`⚠️ שים לב: הכלל קובע ספק ${topRule.supplier}, אבל זיהוי אוטומטי הצביע על ${identifiedSupplier}`);
+            }
 
             return {
                 shouldProcess: true,
@@ -299,7 +324,7 @@ class MonitoringService {
                 topRule,
                 forwardToAutomation: topRule.forwardToAutomation !== false,
                 priority: topRule.priority,
-                supplier: topRule.supplier, // ✅ זה הספק מ-MongoDB!
+                supplier: topRule.supplier, // ✅ הספק לפי הכלל (לא זיהוי אוטומטי!)
                 identifiedSupplier,
                 notificationEmails: topRule.notificationEmails || []
             };

@@ -52,9 +52,16 @@ class AutoRenewalService {
             
             const renewed = results.filter(r => r.status === 'renewed').length;
             const failed = results.filter(r => r.status === 'failed').length;
+            const cleaned = results.filter(r => r.status === 'cleaned').length;
 
-            if (renewed > 0 || failed > 0) {
-                logger.info(`✅ Auto-renewal הושלם: ${renewed} חודש, ${failed} נכשל`);
+            if (renewed > 0 || failed > 0 || cleaned > 0) {
+                logger.info(`✅ Auto-renewal הושלם: ${renewed} חודש, ${cleaned} נוקו, ${failed} נכשל`);
+                
+                if (cleaned > 0) {
+                    logger.info(`🧹 ${cleaned} subscriptions לא תקינים נוקו:`, 
+                        results.filter(r => r.status === 'cleaned').map(r => `${r.email}: ${r.message}`)
+                    );
+                }
                 
                 if (failed > 0) {
                     logger.warn(`⚠️ ${failed} subscriptions נכשלו בחידוש:`, 
@@ -69,6 +76,7 @@ class AutoRenewalService {
                 success: true,
                 renewed,
                 failed,
+                cleaned,
                 results
             };
 

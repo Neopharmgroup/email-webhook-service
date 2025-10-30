@@ -179,20 +179,55 @@ class SubscriptionService {
 
             for (const sub of expiringSubs) {
                 try {
-                    await this.renewSubscription(sub.subscriptionId, 'AUTO_RENEWAL');
-                    results.push({
-                        subscriptionId: sub.subscriptionId,
-                        email: sub.email,
-                        status: 'renewed',
-                        message: 'Subscription חודש אוטומטית'
-                    });
+                    const renewResult = await this.renewSubscription(sub.subscriptionId, 'AUTO_RENEWAL');
+                    
+                    if (renewResult.cleaned) {
+                        // Subscription was invalid and was cleaned up
+                        results.push({
+                            subscriptionId: sub.subscriptionId,
+                            email: sub.email,
+                            status: 'cleaned',
+                            message: renewResult.message || 'Subscription was invalid and was deactivated'
+                        });
+                    } else {
+                        // Normal renewal
+                        results.push({
+                            subscriptionId: sub.subscriptionId,
+                            email: sub.email,
+                            status: 'renewed',
+                            message: 'Subscription חודש אוטומטית'
+                        });
+                    }
                 } catch (error) {
-                    results.push({
-                        subscriptionId: sub.subscriptionId,
-                        email: sub.email,
-                        status: 'failed',
-                        error: error.message
-                    });
+                    // Check if it's an invalid ID error
+                    if (error.message.includes('Subscription ID format is invalid')) {
+                        // Deactivate the subscription in DB
+                        try {
+                            await Subscription.deactivate(sub.subscriptionId, 'AUTO_RENEWAL');
+                            results.push({
+                                subscriptionId: sub.subscriptionId,
+                                email: sub.email,
+                                status: 'cleaned',
+                                message: 'Invalid subscription ID - deactivated',
+                                error: error.message
+                            });
+                        } catch (deactivateError) {
+                            results.push({
+                                subscriptionId: sub.subscriptionId,
+                                email: sub.email,
+                                status: 'failed',
+                                error: `Invalid ID and failed to deactivate: ${deactivateError.message}`
+                            });
+                        }
+                    } else {
+                        // Other errors
+                        results.push({
+                            subscriptionId: sub.subscriptionId,
+                            email: sub.email,
+                            status: 'failed',
+                            error: error.message
+                        });
+                    }
                 }
             }
 

@@ -38,11 +38,15 @@ class WebhookService {
         this.graphApiUrl = config.azure.graphApiUrl;
         this.accessToken = null;
 
-        // רשימת מיילים דינמית - תתעדכן מבסיס הנתונים
+        // רשימת מיילים דינמית - תתעדכן מבסיס הנתונים בלבד
         this.automationEmails = [];
+        
+        // מיפוי ספקים דינמי - יתעדכן מבסיס הנתונים בלבד
+        this.supplierMapping = {};
+        
         this.isInitialized = false;
         
-        // לא נטען עדיין - ננח חד לחיבור למסד הנתונים
+        // לא נטען עדיין - ננתח חד לחיבור למסד הנתונים
 
         // בדיקה שblobStorageService טעון כראוי
         console.log(`🔧 blobStorageService זמין:`, {
@@ -51,44 +55,6 @@ class WebhookService {
             hasSasMethod: !!(blobStorageService && blobStorageService.getFileUrlWithSAS),
             methods: blobStorageService ? Object.keys(blobStorageService).slice(0, 5) : []
         });
-
-        // מיפוי ספקי שילוח לפי כתובת מייל ונושא
-        // this.supplierMapping = {
-        //     // UPS
-        //     'ups': 'UPS',
-        //     'united parcel': 'UPS',
-        //     'ups.com': 'UPS',
-        //     'quantum view': 'UPS',
-        //     'ups import': 'UPS',
-        //     'ups notification': 'UPS',
-        //     'ups tracking': 'UPS',
-
-        //     // FedEx
-        //     'fedex': 'FEDEX',
-        //     'fed ex': 'FEDEX',
-        //     'federal express': 'FEDEX',
-        //     'fedex.com': 'FEDEX',
-
-        //     // DHL
-        //     'dhl': 'DHL',
-        //     'dhl.com': 'DHL',
-        //     'dalsey': 'DHL',
-        //     'hillblom': 'DHL',
-        //     'lynn': 'DHL',
-
-        //     // מיילים לבדיקה - נתייחס אליהם כספק UPS לצורך הבדיקה
-        //     'michal.l@neopharmgroup.com': 'UPS',
-        //     'neopharmgroup.com': 'UPS',
-        //     'cloudteamsdev@neopharmgroup.com': 'UPS',
-
-        //     // מילות מפתח נוספות
-        //     'tracking': null, // יחפש גם מילים אחרות
-        //     'shipment': null,
-        //     'delivery': null,
-        //     'משלוח': null,
-        //     'מעקב': null,
-        //     'חבילה': null
-        // };
 
         // הוספת cache למניעת שליחות כפולות לאוטומציה
         this.sentToAutomationCache = new Map();
@@ -103,41 +69,6 @@ class WebhookService {
             }
         }, 10 * 60 * 1000);
     }
-
-    // זיהוי ספק שילוח לפי כתובת מייל ונושא ההודעה
-    // identifySupplier(email, subject = '') {
-    //     const emailLower = email.toLowerCase();
-    //     const subjectLower = subject.toLowerCase();
-
-    //     // חפש במייל ובנושא
-    //     const searchText = `${emailLower} ${subjectLower}`;
-
-    //     console.log(`🔍 מחפש ספק ב: "${email}" | "${subject}"`);
-    //     console.log(`🔍 טקסט חיפוש: "${searchText}"`);
-
-    //     // תחילה חפש ספקים ספציפיים
-    //     for (const [keyword, supplier] of Object.entries(this.supplierMapping)) {
-    //         if (supplier && searchText.includes(keyword)) {
-    //             console.log(`✅ ספק ${supplier} זוהה לפי המילה "${keyword}"`);
-    //             return supplier;
-    //         }
-    //     }
-
-    //     console.log(`🔍 בדיקת מילות מפתח: ${Object.keys(this.supplierMapping).filter(k => this.supplierMapping[k]).join(', ')}`);
-
-    //     // אם לא נמצא ספק ספציפי, בדוק אם יש מילות מפתח של משלוח
-    //     const shippingKeywords = ['tracking', 'shipment', 'delivery', 'משלוח', 'מעקב', 'חבילה'];
-    //     const hasShippingKeyword = shippingKeywords.some(keyword => searchText.includes(keyword));
-
-    //     if (hasShippingKeyword) {
-    //         console.log(`📦 זוהה מייל משלוח אבל ספק לא זוהה עבור: ${email}`);
-    //         // אם זה נראה כמו מייל משלוח אבל הספק לא זוהה, החזר null אבל עם הערה
-    //         return 'UNKNOWN_SHIPPING';
-    //     }
-
-    //     console.log(`❓ לא זוהה ספק או מילות מפתח של משלוח עבור: ${email}`);
-    //     return null;
-    // }
 
     async processNotifications(notifications = []) {
         const results = [];
@@ -1624,25 +1555,12 @@ class WebhookService {
                 
         } catch (error) {
             console.error('❌ שגיאה בטעינת הגדרות מיילים:', error);
-            // נסה להשתמש ברשימה הקיימת או ברירת מחדל
-            this.fallbackToDefaultEmails();
+            // במקרה של שגיאה - השאר רשימה ריקה (הכל דינמי מ-MongoDB בלבד)
+            console.error('⚠️ לא נטענו הגדרות מייל - השירות לא יעבד מיילים עד לתיקון החיבור למסד הנתונים');
+            this.automationEmails = [];
+            this.supplierMapping = {};
         }
     }
-
-    // // שימוש ברשימה ברירת מחדל במקרה של שגיאה
-    // fallbackToDefaultEmails() {
-    //     console.warn('⚠️ משתמש ברשימת מיילים ברירת מחדל');
-    //     this.automationEmails = [
-    //         'michal.l@neopharmgroup.com',
-    //         'cloudteamsdev@neopharmgroup.com',
-    //         'test@neopharmgroup.com',
-    //         'noreply@fedex.com',
-    //         'notification@fedex.com',
-    //         'noreply@ups.com',
-    //         'notification@ups.com',
-    //         'noreply@dhl.com'
-    //     ];
-    // }
 
     // עדכון רשימת המיילים (נקרא מהcontroller)
     updateAutomationEmails(newEmails) {
@@ -1651,45 +1569,45 @@ class WebhookService {
     }
 
     // עדכון מיפוי ספקים (נקרא מהcontroller)
-    // updateSupplierMapping(newMapping) {
-    //     // שמור את המיפויים הבסיסיים
-    //     const baseMapping = {
-    //         // UPS
-    //         'ups': 'UPS',
-    //         'united parcel': 'UPS',
-    //         'ups.com': 'UPS',
-    //         'quantum view': 'UPS',
-    //         'ups import': 'UPS',
-    //         'ups notification': 'UPS',
-    //         'ups tracking': 'UPS',
+    updateSupplierMapping(newMapping) {
+        // שמור את המיפויים הבסיסיים
+        const baseMapping = {
+            // UPS
+            'ups': 'UPS',
+            'united parcel': 'UPS',
+            'ups.com': 'UPS',
+            'quantum view': 'UPS',
+            'ups import': 'UPS',
+            'ups notification': 'UPS',
+            'ups tracking': 'UPS',
 
-    //         // FedEx
-    //         'fedex': 'FEDEX',
-    //         'fed ex': 'FEDEX',
-    //         'federal express': 'FEDEX',
-    //         'fedex.com': 'FEDEX',
+            // FedEx
+            'fedex': 'FEDEX',
+            'fed ex': 'FEDEX',
+            'federal express': 'FEDEX',
+            'fedex.com': 'FEDEX',
 
-    //         // DHL
-    //         'dhl': 'DHL',
-    //         'dhl.com': 'DHL',
-    //         'dalsey': 'DHL',
-    //         'hillblom': 'DHL',
-    //         'lynn': 'DHL',
+            // DHL
+            'dhl': 'DHL',
+            'dhl.com': 'DHL',
+            'dalsey': 'DHL',
+            'hillblom': 'DHL',
+            'lynn': 'DHL',
 
-    //         // מילות מפתח נוספות
-    //         'tracking': null,
-    //         'shipment': null,
-    //         'delivery': null,
-    //         'משלוח': null,
-    //         'מעקב': null,
-    //         'חבילה': null
-    //     };
+            // מילות מפתח נוספות
+            'tracking': null,
+            'shipment': null,
+            'delivery': null,
+            'משלוח': null,
+            'מעקב': null,
+            'חבילה': null
+        };
 
-    //     // מיזוג עם המיפויים החדשים מבסיס הנתונים
-    //     this.supplierMapping = { ...baseMapping, ...newMapping };
+        // מיזוג עם המיפויים החדשים מבסיס הנתונים
+        this.supplierMapping = { ...baseMapping, ...newMapping };
         
-    //     console.log(`🔄 מיפוי ספקים עודכן עם ${Object.keys(newMapping).length} הגדרות מותאמות אישית`);
-    // }
+        console.log(`🔄 מיפוי ספקים עודכן עם ${Object.keys(newMapping).length} הגדרות מותאמות אישית`);
+    }
 
     // אתחול שירות המוניטורינג (נקרא אחרי חיבור הדאטהבייס)
     async initializeMonitoringService() {
@@ -1718,7 +1636,10 @@ class WebhookService {
             console.log('✅ WebhookService אותחל בהצלחה');
         } catch (error) {
             console.error('❌ שגיאה באתחול WebhookService:', error);
-            this.fallbackToDefaultEmails();
+            // לא משתמשים ברשימת ברירת מחדל - הכל דינמי מ-MongoDB
+            console.error('⚠️ WebhookService לא יעבד מיילים עד שהחיבור ל-MongoDB יתוקן');
+            this.automationEmails = [];
+            this.supplierMapping = {};
             this.isInitialized = true; // חשוב להגדיר גם במקרה של שגיאה
         }
     }

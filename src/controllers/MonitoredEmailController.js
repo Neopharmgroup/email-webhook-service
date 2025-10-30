@@ -155,7 +155,7 @@ class MonitoredEmailController {
     // עדכון סטטוס מייל
     async updateEmailStatus(req, res) {
         try {
-            const { email } = req.params;
+            const { email } = req.params; // Already decoded by middleware
             const { status, updatedBy, notes } = req.body;
 
             if (!status || !updatedBy) {
@@ -183,7 +183,7 @@ class MonitoredEmailController {
 
             res.json({
                 message: 'סטטוס עודכן בהצלחה',
-                email,
+                email: email,
                 status,
                 updatedBy,
                 updatedAt: new Date().toISOString()
@@ -201,7 +201,7 @@ class MonitoredEmailController {
     // הסרת מייל מניטור
     async removeEmail(req, res) {
         try {
-            const { email } = req.params;
+            const { email } = req.params; // Already decoded by middleware
             const { removedBy, reason } = req.body;
 
             if (!removedBy || !reason) {
@@ -221,7 +221,7 @@ class MonitoredEmailController {
 
             res.json({
                 message: 'מייל הוסר מניטור בהצלחה',
-                email,
+                email: email,
                 removedBy,
                 reason
             });
@@ -238,13 +238,13 @@ class MonitoredEmailController {
     // קבלת פרטי מייל ספציפי
     async getEmailDetails(req, res) {
         try {
-            const { email } = req.params;
-            const decodedEmail = decodeURIComponent(email);
+            const { email } = req.params; // Already decoded by middleware
+            // Extra decode removed - middleware handles it
 
-            const monitoredEmail = await MonitoredEmail.findByEmail(decodedEmail);
+            const monitoredEmail = await MonitoredEmail.findByEmail(email);
             if (!monitoredEmail) {
                 return res.status(404).json({ 
-                    error: `המייל ${decodedEmail} לא נמצא ברשימת המעקב` 
+                    error: `המייל ${email} לא נמצא ברשימת המעקב` 
                 });
             }
 

@@ -1,7 +1,7 @@
 const express = require('express');
 const { MonitoredEmailController } = require('../controllers');
 const { SubscriptionController } = require('../controllers');
-const { validation } = require('../middleware');
+const { validation, decodeEmailParam } = require('../middleware');
 
 const router = express.Router();
 
@@ -30,22 +30,26 @@ router.get('/automation/list',
 );
 
 router.get('/:email', 
+    decodeEmailParam,
     validation.validateEmailParam,
     MonitoredEmailController.getEmailDetails
 );
 
 router.patch('/:email/status', 
+    decodeEmailParam,
     validation.validateEmailParam,
     MonitoredEmailController.updateEmailStatus
 );
 
 router.delete('/:email', 
+    decodeEmailParam,
     validation.validateEmailParam,
     MonitoredEmailController.removeEmail
 );
 
 // Add subscription creation route for monitored emails
 router.post('/:email/subscription', 
+    decodeEmailParam,
     validation.validateEmailParam,
     SubscriptionController.createSubscription
 );
